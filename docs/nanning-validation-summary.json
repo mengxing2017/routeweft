@@ -1,0 +1,407 @@
+{
+  "date": "2026-10-19",
+  "scope": "Explicit block_ways policy; standalone RouteWeft verification",
+  "input": {
+    "bytes": 1336837,
+    "sha256": "e7eee17e89b65bdff18bdc1be45e59952a1a3774fc9845a9488e67968f31c4ba",
+    "parent_sha256": "eea0eb47bba0640b2c6468a1b82cb2c5f8ea1261a5333f47420e6d569f0b769d",
+    "parent_snapshot": "2026-08-03T20:21:36Z",
+    "extract_snapshot": null,
+    "bbox": [
+      108.25,
+      22.75,
+      108.42,
+      22.88
+    ]
+  },
+  "binary_sha256": "94e88551281c5784e7de481b25513cef73c3f47f2dd47f51de701c41e8a7e65d",
+  "manifest": {
+    "attribution": "© OpenStreetMap contributors; ODbL 1.0; https://www.openstreetmap.org/copyright",
+    "builder": "0.1.0",
+    "dataset_id": "d0b8611982f748ca5276d8b32d2076e07ef137cb3a9c7567ee9a663d4363718b",
+    "diagnostics": {
+      "access_or_conditional_ways_blocked": 192,
+      "blocked_nodes": 213,
+      "blocked_way_access": 185,
+      "blocked_way_conditional_tag": 1,
+      "blocked_way_dimensions": 2,
+      "blocked_way_emergency_access": 4,
+      "input_nodes": 143111,
+      "input_relations": 822,
+      "input_ways": 18939,
+      "invalid_restriction_ways_blocked": 8,
+      "invalid_restrictions_blocked": 5,
+      "non_driving_restrictions": 5,
+      "resolved_restrictions": 28,
+      "unsupported_way_class": 11383
+    },
+    "edges": 68164,
+    "format": 1,
+    "graph_bytes": 10981027,
+    "graph_file": "graph.json",
+    "graph_sha256": "e73d1fe482c3c4de3f054bf04212484a6a5c7c6b9947edb3c17911feb72aabea",
+    "nodes": 42345,
+    "profile": "driving-v1",
+    "restrictions": 33,
+    "source_sha256": "e7eee17e89b65bdff18bdc1be45e59952a1a3774fc9845a9488e67968f31c4ba",
+    "source_snapshot": null
+  },
+  "report": {
+    "blocked_way_ids": [
+      389190340,
+      389194568,
+      463383946,
+      538394321,
+      625702143,
+      917246626,
+      917246627,
+      1014107014
+    ],
+    "diagnostics": {
+      "access_or_conditional_ways_blocked": 192,
+      "blocked_nodes": 213,
+      "blocked_way_access": 185,
+      "blocked_way_conditional_tag": 1,
+      "blocked_way_dimensions": 2,
+      "blocked_way_emergency_access": 4,
+      "input_nodes": 143111,
+      "input_relations": 822,
+      "input_ways": 18939,
+      "invalid_restriction_ways_blocked": 8,
+      "invalid_restrictions_blocked": 5,
+      "non_driving_restrictions": 5,
+      "resolved_restrictions": 28,
+      "unsupported_way_class": 11383
+    },
+    "edges": 68164,
+    "failure_code": null,
+    "nodes": 42345,
+    "policy": "block_ways",
+    "restriction_diagnostics": [
+      {
+        "action": "blocked_ways",
+        "code": "MissingVia",
+        "members": [
+          {
+            "id": 389194568,
+            "kind": "way",
+            "role": "from"
+          },
+          {
+            "id": 389190340,
+            "kind": "way",
+            "role": "to"
+          }
+        ],
+        "members_truncated": false,
+        "message": "restriction has no via member; turn location is not inferred",
+        "relation_id": 6843783,
+        "tags": {
+          "restriction": "no_right_turn",
+          "type": "restriction"
+        }
+      },
+      {
+        "action": "blocked_ways",
+        "code": "MissingVia",
+        "members": [
+          {
+            "id": 389194568,
+            "kind": "way",
+            "role": "from"
+          },
+          {
+            "id": 463383946,
+            "kind": "way",
+            "role": "to"
+          }
+        ],
+        "members_truncated": false,
+        "message": "restriction has no via member; turn location is not inferred",
+        "relation_id": 6843784,
+        "tags": {
+          "restriction": "no_straight_on",
+          "type": "restriction"
+        }
+      },
+      {
+        "action": "blocked_ways",
+        "code": "MissingVia",
+        "members": [
+          {
+            "id": 389194568,
+            "kind": "way",
+            "role": "from"
+          },
+          {
+            "id": 389194568,
+            "kind": "way",
+            "role": "to"
+          }
+        ],
+        "members_truncated": false,
+        "message": "restriction has no via member; turn location is not inferred",
+        "relation_id": 6843785,
+        "tags": {
+          "restriction": "no_u_turn",
+          "type": "restriction"
+        }
+      },
+      {
+        "action": "blocked_ways",
+        "code": "MissingFromTo",
+        "members": [
+          {
+            "id": 538394321,
+            "kind": "way",
+            "role": "from"
+          },
+          {
+            "id": 1014107014,
+            "kind": "way",
+            "role": "from"
+          },
+          {
+            "id": 917246627,
+            "kind": "way",
+            "role": "from"
+          },
+          {
+            "id": 917246626,
+            "kind": "way",
+            "role": "from"
+          }
+        ],
+        "members_truncated": false,
+        "message": "restriction needs from and to members",
+        "relation_id": 8700340,
+        "tags": {
+          "restriction": "no_right_turn",
+          "type": "restriction"
+        }
+      },
+      {
+        "action": "blocked_ways",
+        "code": "MissingFromTo",
+        "members": [
+          {
+            "id": 625702143,
+            "kind": "way",
+            "role": "to"
+          }
+        ],
+        "members_truncated": false,
+        "message": "restriction needs from and to members",
+        "relation_id": 8700341,
+        "tags": {
+          "restriction": "no_right_turn",
+          "type": "restriction"
+        }
+      }
+    ],
+    "restrictions": 33,
+    "source_sha256": "e7eee17e89b65bdff18bdc1be45e59952a1a3774fc9845a9488e67968f31c4ba",
+    "source_snapshot": null,
+    "valid": true
+  },
+  "success_query": {
+    "coordinates": "108.32,22.82;108.33,22.82",
+    "distance_m": 1864.268,
+    "duration_s": 123.488
+  },
+  "no_route_query": {
+    "coordinates": "108.2532541,22.7745994;108.2534996,22.7738817",
+    "radius_m": 0.01,
+    "expected": "NoRoute",
+    "source_way": 57038484
+  },
+  "commands": [
+    {
+      "command": "version",
+      "exit_code": 0,
+      "elapsed_ms": 2.8697520028799772,
+      "sampled_vm_hwm_kib": 608
+    },
+    {
+      "command": "preflight",
+      "exit_code": 0,
+      "elapsed_ms": 258.44733499980066,
+      "sampled_vm_hwm_kib": 60260
+    },
+    {
+      "command": "build",
+      "exit_code": 0,
+      "elapsed_ms": 468.63707999000326,
+      "sampled_vm_hwm_kib": 79408
+    },
+    {
+      "command": "verify",
+      "exit_code": 0,
+      "elapsed_ms": 74.24939698830713,
+      "sampled_vm_hwm_kib": 23168
+    },
+    {
+      "command": "nearest",
+      "exit_code": 0,
+      "elapsed_ms": 94.62537999206688,
+      "sampled_vm_hwm_kib": 25000
+    },
+    {
+      "command": "route",
+      "exit_code": 0,
+      "elapsed_ms": 99.29456800455227,
+      "sampled_vm_hwm_kib": 25288
+    },
+    {
+      "command": "route",
+      "exit_code": 3,
+      "elapsed_ms": 94.9253089929698,
+      "sampled_vm_hwm_kib": 25000
+    },
+    {
+      "command": "build",
+      "exit_code": 0,
+      "elapsed_ms": 408.0388759903144,
+      "sampled_vm_hwm_kib": 79336
+    },
+    {
+      "command": "verify",
+      "exit_code": 0,
+      "elapsed_ms": 76.19105800404213,
+      "sampled_vm_hwm_kib": 23296
+    },
+    {
+      "command": "nearest",
+      "exit_code": 0,
+      "elapsed_ms": 94.93007400305942,
+      "sampled_vm_hwm_kib": 25164
+    },
+    {
+      "command": "route",
+      "exit_code": 0,
+      "elapsed_ms": 97.25145000265911,
+      "sampled_vm_hwm_kib": 25128
+    },
+    {
+      "command": "route",
+      "exit_code": 3,
+      "elapsed_ms": 94.20612400572281,
+      "sampled_vm_hwm_kib": 24996
+    },
+    {
+      "command": "verify",
+      "exit_code": 0,
+      "elapsed_ms": 76.5160519949859,
+      "sampled_vm_hwm_kib": 23040
+    },
+    {
+      "command": "nearest",
+      "exit_code": 0,
+      "elapsed_ms": 96.9779189908877,
+      "sampled_vm_hwm_kib": 25128
+    },
+    {
+      "command": "route",
+      "exit_code": 0,
+      "elapsed_ms": 91.99640199949499,
+      "sampled_vm_hwm_kib": 25240
+    },
+    {
+      "command": "route",
+      "exit_code": 3,
+      "elapsed_ms": 97.01285400660709,
+      "sampled_vm_hwm_kib": 24872
+    }
+  ],
+  "archives": [
+    {
+      "name": "routing.zip",
+      "bytes": 1249155,
+      "sha256": "94c898b3462337ca93e32e5a66509a6724bf3b74da8cd5fbc1c1dd4a3752e6c8"
+    },
+    {
+      "name": "routing.tar.gz",
+      "bytes": 1183625,
+      "sha256": "b9e779292fa3e3174503515148486ed638a3c55de31c9e5edfb5a498733f162f"
+    }
+  ],
+  "od": {
+    "count": 1000,
+    "seed": 20261019,
+    "status": {
+      "NoRoute": 160,
+      "ok": 840
+    },
+    "p95_ms": 19.224034
+  },
+  "continuous_load": {
+    "dataset_id": "d0b8611982f748ca5276d8b32d2076e07ef137cb3a9c7567ee9a663d4363718b",
+    "load_ms": 93.88690500000001,
+    "measure_s": 300,
+    "nearest": {
+      "count": 1500,
+      "failures": 0,
+      "p95_ms": 0.805387,
+      "status": {
+        "ok": 1500
+      }
+    },
+    "qps_per_operation": 5,
+    "queue_included": true,
+    "route": {
+      "count": 1500,
+      "failures": 240,
+      "p95_ms": 37.351211,
+      "status": {
+        "ok": 1260,
+        "NoRoute": 240
+      }
+    },
+    "warmup_s": 30
+  },
+  "memory_probe": {
+    "after_queries": "VmHWM:\t   33424 kB\nVmRSS:\t   33424 kB",
+    "dataset_id": "d0b8611982f748ca5276d8b32d2076e07ef137cb3a9c7567ee9a663d4363718b",
+    "load_ms": 91.462487,
+    "loaded": "VmHWM:\t   25016 kB\nVmRSS:\t   25016 kB",
+    "od_count": 1000,
+    "status": {
+      "NoRoute": 160,
+      "ok": 840
+    }
+  },
+  "restriction_cases": [
+    {
+      "ways": [
+        388985484,
+        999853018
+      ],
+      "coordinates": "108.33204270000002,22.865449050000002;108.3321354,22.8654055",
+      "radius_m": 0.01,
+      "restricted_duration_s": 173.115,
+      "unrestricted_control_duration_s": 0.829
+    },
+    {
+      "ways": [
+        395680031,
+        1527161847
+      ],
+      "coordinates": "108.2696973,22.83935075;108.26920825,22.839528100000003",
+      "radius_m": 0.01,
+      "restricted_duration_s": 7.508,
+      "unrestricted_control_duration_s": 3.057
+    }
+  ],
+  "conditions": {
+    "platform": "Linux x86_64",
+    "rust": "1.97.1",
+    "mode": "release/LTO",
+    "cpu": "Intel Xeon E-2278G, 16 logical CPUs",
+    "ram_gib": 62.6,
+    "page_cache": "not cleared",
+    "host": "shared development machine; not isolated",
+    "rss": "sampled VmHWM; memory_probe reports kernel VmHWM after exec"
+  },
+  "benchmark_binary_sha256": "5f93ebd6a4de28cdfd50cc6eea4ca02c53ac50dfc37b3b8692376f7d52ffa384",
+  "memory_probe_binary_sha256": "5a252ac72ee38977b49728dc6a0b6c34a5a133b6ae9f461b9d3c4ce311afa3b9"
+}
