@@ -2,7 +2,7 @@
 //! Supports raw/zlib blocks and ordinary/dense nodes; no copied protobuf code.
 use flate2::read::ZlibDecoder;
 use routeweft_dataset::{invalid, Error, Point, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 pub type Tags = BTreeMap<String, String>;
@@ -22,6 +22,7 @@ pub struct Member {
     pub role: String,
 }
 pub struct Relation {
+    pub id: i64,
     pub members: Vec<Member>,
     pub tags: Tags,
 }
@@ -32,6 +33,7 @@ pub struct Osm {
     pub relations: Vec<Relation>,
     pub snapshot: Option<i64>,
     estimated_bytes: usize,
+    relation_ids: BTreeSet<i64>,
 }
 impl Osm {
     fn charge(&mut self, bytes: usize) -> Result<()> {
@@ -291,11 +293,22 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                     }
                 }
                 4 => {
+                    let relation_id = int(&v, 1, None)? as i64;
+                    if !osm.relation_ids.insert(relation_id) {
+                        return Err(invalid(format!("duplicate relation {relation_id}")));
+                    }
                     let ids = delta(packed(&v, 9)?)?;
                     let roles = packed(&v, 8)?;
                     let kinds = packed(&v, 10)?;
                     if ids.len() != roles.len() || ids.len() != kinds.len() {
-                        return Err(invalid("relation arrays"));
+                        return Err(invalid(format!(
+                            "relation {relation_id}: inconsistent member arrays"
+                        )));
+                    }
+                    if kinds.iter().any(|k| *k > 2) {
+                        return Err(invalid(format!(
+                            "relation {relation_id}: invalid member type"
+                        )));
                     }
                     let members = ids
                         .into_iter()
@@ -315,7 +328,11 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                         128 + tag_bytes(&tags)
                             + members.iter().map(|m| 64 + m.role.len()).sum::<usize>(),
                     )?;
-                    osm.relations.push(Relation { members, tags });
+                    osm.relations.push(Relation {
+                        id: relation_id,
+                        members,
+                        tags,
+                    });
                 }
                 _ => {}
             }

@@ -1,7 +1,16 @@
 //! Offline PBF preprocessing with a deliberately conservative driving profile.
+mod diagnostics;
 pub mod pbf;
+mod restrictions;
+pub use diagnostics::{
+    BuildOptions, Error, InputReport, InvalidRestrictionPolicy, MemberDiagnostic,
+    RestrictionDiagnostic, Result,
+};
 use pbf::{Osm, Tags};
-use routeweft_dataset::{invalid, Edge, Error, Graph, Manifest, Point, Result};
+use routeweft_dataset::{Edge, Error as DataError, Graph, Manifest, Point};
+fn invalid(message: impl Into<String>) -> Error {
+    routeweft_dataset::invalid(message).into()
+}
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -81,7 +90,15 @@ fn count(stats: &mut BTreeMap<String, u64>, key: &str) {
 /// Build with deterministic OSM-ID and way/member order. Every retained adjacent
 /// node pair becomes an edge; no geometric intersections are invented.
 pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
-    let mut stats = BTreeMap::new();
+    let (graph, report) = prepare(osm, BuildOptions::default())?;
+    Ok((graph, report.diagnostics))
+}
+fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap<String, u64>)> {
+    let mut stats = BTreeMap::from([
+        ("input_nodes".into(), osm.nodes.len() as u64),
+        ("input_ways".into(), osm.ways.len() as u64),
+        ("input_relations".into(), osm.relations.len() as u64),
+    ]);
     let mut selected = Vec::new();
     let mut used = BTreeSet::new();
     let mut blocked = BTreeSet::new();
@@ -102,9 +119,7 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
     // all involved ways instead of silently permitting an illegal movement.
     let mut conditional_ways = BTreeSet::new();
     for rel in &osm.relations {
-        if value(&rel.tags, "type") == "restriction"
-            && rel.tags.keys().any(|k| k.contains("conditional"))
-        {
+        if restrictions::applies(rel) && restrictions::conditional(rel) {
             for m in &rel.members {
                 if m.kind == 1 {
                     conditional_ways.insert(m.id);
@@ -114,28 +129,43 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
         }
     }
     for way in osm.ways.values() {
+        if excluded.contains(&way.id) {
+            continue;
+        }
         let class = value(&way.tags, "highway");
         let Some(default) = default_speed(class) else {
             count(&mut stats, "unsupported_way_class");
             continue;
         };
-        if (!directional_access(&way.tags, "forward") && !directional_access(&way.tags, "backward"))
-            || value(&way.tags, "area") == "yes"
-            || value(&way.tags, "service") == "emergency_access"
-            || way.tags.keys().any(|k| {
-                [
-                    "maxheight",
-                    "maxwidth",
-                    "maxweight",
-                    "maxlength",
-                    "maxaxleload",
-                ]
-                .iter()
-                .any(|base| k == base || k.starts_with(&format!("{base}:")))
-            })
-            || conditional_ways.contains(&way.id)
-            || way.tags.keys().any(|k| k.contains(":conditional"))
+        let exclusion = if !directional_access(&way.tags, "forward")
+            && !directional_access(&way.tags, "backward")
         {
+            Some("blocked_way_access")
+        } else if value(&way.tags, "area") == "yes" {
+            Some("blocked_way_area")
+        } else if value(&way.tags, "service") == "emergency_access" {
+            Some("blocked_way_emergency_access")
+        } else if way.tags.keys().any(|k| {
+            [
+                "maxheight",
+                "maxwidth",
+                "maxweight",
+                "maxlength",
+                "maxaxleload",
+            ]
+            .iter()
+            .any(|base| k == base || k.starts_with(&format!("{base}:")))
+        }) {
+            Some("blocked_way_dimensions")
+        } else if conditional_ways.contains(&way.id) {
+            Some("blocked_way_conditional_restriction")
+        } else if way.tags.keys().any(|k| k.contains(":conditional")) {
+            Some("blocked_way_conditional_tag")
+        } else {
+            None
+        };
+        if let Some(reason) = exclusion {
+            count(&mut stats, reason);
             count(&mut stats, "access_or_conditional_ways_blocked");
             continue;
         }
@@ -156,14 +186,24 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
                     0
                 }
             }
-            _ => return Err(invalid("unsupported oneway")),
+            _ => {
+                return Err(invalid(format!(
+                    "way {}: unsupported oneway {}",
+                    way.id,
+                    value(&way.tags, "oneway")
+                )))
+            }
         };
-        let base = speed(value(&way.tags, "maxspeed"), default)?;
-        let forward = speed(value(&way.tags, "maxspeed:forward"), base)?;
-        let backward = speed(value(&way.tags, "maxspeed:backward"), base)?;
+        let contextual = |e: Error| invalid(format!("way {}: {e}", way.id));
+        let base = speed(value(&way.tags, "maxspeed"), default).map_err(contextual)?;
+        let forward = speed(value(&way.tags, "maxspeed:forward"), base).map_err(contextual)?;
+        let backward = speed(value(&way.tags, "maxspeed:backward"), base).map_err(contextual)?;
         for &node in &way.refs {
             if !osm.nodes.contains_key(&node) {
-                return Err(invalid("way references missing node"));
+                return Err(invalid(format!(
+                    "way {} references missing node {node}",
+                    way.id
+                )));
             }
             used.insert(node);
         }
@@ -174,6 +214,21 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
     for id in used {
         mapping.insert(id, nodes.len());
         nodes.push(osm.nodes[&id].point);
+    }
+    if let Some(first) = nodes.first() {
+        let (mut min_lon, mut max_lon, mut min_lat, mut max_lat) =
+            (first.lon, first.lon, first.lat, first.lat);
+        for p in &nodes {
+            min_lon = min_lon.min(p.lon);
+            max_lon = max_lon.max(p.lon);
+            min_lat = min_lat.min(p.lat);
+            max_lat = max_lat.max(p.lat);
+        }
+        if max_lon - min_lon > 5. || max_lat - min_lat > 5. {
+            return Err(invalid(
+                "unsupported geographic extent: city graph must span at most 5 degrees per axis",
+            ));
+        }
     }
     let mut edges = Vec::new();
     let mut by_way: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
@@ -212,7 +267,7 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
                     continue;
                 }
                 if edges.len() >= 2_000_000 {
-                    return Err(Error::LimitExceeded);
+                    return Err(DataError::LimitExceeded.into());
                 }
                 by_way.entry(way.id).or_default().push(edges.len());
                 edges.push(Edge {
@@ -237,126 +292,62 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
     }
     let mut forbidden = BTreeSet::new();
     let mut only: BTreeMap<Vec<usize>, BTreeSet<usize>> = BTreeMap::new();
+    let mut failures = Vec::new();
     for rel in &osm.relations {
         if value(&rel.tags, "type") != "restriction" {
             continue;
         }
-        if value(&rel.tags, "except")
-            .split(';')
-            .any(|v| matches!(v.trim(), "motorcar" | "motor_vehicle" | "vehicle"))
-        {
-            count(&mut stats, "excepted_restrictions");
-            continue;
-        }
-        if rel.tags.keys().any(|k| k.contains("conditional")) {
-            continue;
-        }
-        let rule = rel
-            .tags
-            .get("restriction:motorcar")
-            .or_else(|| rel.tags.get("restriction:motor_vehicle"))
-            .or_else(|| rel.tags.get("restriction:vehicle"))
-            .or_else(|| rel.tags.get("restriction"));
-        let Some(rule) = rule else {
-            count(&mut stats, "other_mode_restrictions");
-            continue;
-        };
-        let from: Vec<_> = rel
-            .members
-            .iter()
-            .filter(|m| m.role == "from" && m.kind == 1)
-            .collect();
-        let to: Vec<_> = rel
-            .members
-            .iter()
-            .filter(|m| m.role == "to" && m.kind == 1)
-            .collect();
-        if from.iter().all(|m| !by_way.contains_key(&m.id))
-            || to.iter().all(|m| !by_way.contains_key(&m.id))
-        {
-            count(&mut stats, "non_driving_restrictions");
-            continue;
-        }
-        if from.len() != 1 || to.len() != 1 {
-            return Err(invalid("restriction needs one from/to"));
-        }
-        if !matches!(
-            rule.as_str(),
-            "no_left_turn"
-                | "no_right_turn"
-                | "no_straight_on"
-                | "no_u_turn"
-                | "no_entry"
-                | "no_exit"
-                | "only_left_turn"
-                | "only_right_turn"
-                | "only_straight_on"
-                | "only_u_turn"
-        ) {
-            return Err(invalid(format!("unsupported static restriction {rule}")));
-        }
-        let via: Vec<_> = rel.members.iter().filter(|m| m.role == "via").collect();
-        let mut sequences = Vec::new();
-        if via.len() == 1 && via[0].kind == 0 {
-            let Some(&node) = mapping.get(&via[0].id) else {
-                return Err(invalid("missing via node"));
-            };
-            for &a in by_way.get(&from[0].id).into_iter().flatten() {
-                if edges[a].to != node {
-                    continue;
-                }
-                for &b in &outgoing[node] {
-                    if edges[b].way != to[0].id {
-                        continue;
-                    }
-                    if from[0].id == to[0].id {
-                        let reverse = edges[b].to == edges[a].from;
-                        if rule.ends_with("u_turn") != reverse {
-                            continue;
-                        }
-                    }
-                    sequences.push(vec![a, b]);
-                }
-            }
-        } else if !via.is_empty() && via.iter().all(|m| m.kind == 1) {
-            let ways: Vec<i64> = via
-                .iter()
-                .map(|m| m.id)
-                .chain(std::iter::once(to[0].id))
-                .collect();
-            let mut work = 0;
-            for &start in by_way.get(&from[0].id).into_iter().flatten() {
-                restriction_paths(
-                    &edges,
-                    &outgoing,
-                    &ways,
-                    0,
-                    vec![start],
-                    false,
-                    &mut sequences,
-                    &mut work,
-                )?;
-            }
-        } else {
-            return Err(invalid("unsupported restriction via members"));
-        }
-        if sequences.is_empty() {
-            return Err(invalid("unresolved driving restriction"));
-        }
-        for sequence in sequences {
-            if rule.starts_with("only_") {
-                // An only-via-way rule constrains every exit along its prefix,
-                // not merely the final transition to the to-way.
-                for split in 1..sequence.len() {
-                    only.entry(sequence[..split].to_vec())
-                        .or_default()
-                        .insert(sequence[split]);
-                }
+        if !restrictions::applies(rel) {
+            let key = if value(&rel.tags, "except")
+                .split(';')
+                .any(|v| matches!(v.trim(), "motorcar" | "motor_vehicle" | "vehicle"))
+            {
+                "excepted_restrictions"
             } else {
-                forbidden.insert(sequence);
+                "other_mode_restrictions"
+            };
+            count(&mut stats, key);
+            continue;
+        }
+        if restrictions::conditional(rel) {
+            continue;
+        }
+        match restrictions::resolve(rel, osm, &mapping, &by_way, &edges, &outgoing) {
+            Ok(Some((rule, sequences))) => {
+                for sequence in sequences {
+                    if rule.starts_with("only_") {
+                        for split in 1..sequence.len() {
+                            only.entry(sequence[..split].to_vec())
+                                .or_default()
+                                .insert(sequence[split]);
+                        }
+                    } else {
+                        forbidden.insert(sequence);
+                    }
+                }
+                count(&mut stats, "resolved_restrictions");
+            }
+            Ok(None) => count(&mut stats, "non_driving_restrictions"),
+            Err(diagnostic) => {
+                if failures.len() >= 256 {
+                    return Err(DataError::LimitExceeded.into());
+                }
+                failures.push(*diagnostic);
             }
         }
-        count(&mut stats, "resolved_restrictions");
+    }
+    if !failures.is_empty() {
+        return Err(Error {
+            source: routeweft_dataset::invalid("invalid driving restrictions"),
+            report: Box::new(InputReport {
+                nodes: nodes.len(),
+                edges: edges.len(),
+                diagnostics: stats,
+                restriction_diagnostics: failures,
+                failure_code: Some("InvalidRestriction".into()),
+                ..Default::default()
+            }),
+        });
     }
     // Union allowed exits for identical only-prefixes before generating exclusions.
     for (prefix, allowed) in only {
@@ -377,59 +368,156 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
     graph.validate(Default::default())?;
     Ok((graph, stats))
 }
-#[allow(clippy::too_many_arguments)]
-fn restriction_paths(
-    edges: &[Edge],
-    outgoing: &[Vec<usize>],
-    ways: &[i64],
-    index: usize,
-    path: Vec<usize>,
-    entered: bool,
-    out: &mut Vec<Vec<usize>>,
-    work: &mut usize,
-) -> Result<()> {
-    *work += 1;
-    if *work > 100_000 || path.len() > 256 || out.len() > 10_000 {
-        return Err(Error::LimitExceeded);
+/// Validate exactly the graph that build would publish, without writing files.
+/// BlockWays re-runs resolution after every conservative road exclusion, since
+/// removing one road can invalidate another restriction's directed path.
+pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)> {
+    let mut relation_ids = BTreeSet::new();
+    if osm.relations.iter().any(|r| !relation_ids.insert(r.id)) {
+        return Err(invalid("duplicate relation identity"));
     }
-    let last = *path.last().ok_or_else(|| invalid("restriction path"))?;
-    for &next in &outgoing[edges[last].to] {
-        if path.contains(&next) || edges[next].to == edges[last].from {
-            continue;
-        }
-        if edges[next].way == ways[index] {
-            let mut p = path.clone();
-            p.push(next);
-            if index == ways.len() - 1 {
-                out.push(p);
-            } else {
-                restriction_paths(edges, outgoing, ways, index, p, true, out, work)?;
+    let mut excluded = BTreeSet::new();
+    let mut audit = Vec::new();
+    loop {
+        match graph_attempt(osm, &excluded) {
+            Ok((graph, mut stats)) => {
+                stats.insert("invalid_restrictions_blocked".into(), audit.len() as u64);
+                stats.insert(
+                    "invalid_restriction_ways_blocked".into(),
+                    excluded.len() as u64,
+                );
+                let report = InputReport {
+                    valid: true,
+                    policy: options.invalid_restrictions,
+                    nodes: graph.nodes.len(),
+                    edges: graph.edges.len(),
+                    restrictions: graph.forbidden.len(),
+                    source_snapshot: osm.snapshot,
+                    diagnostics: stats,
+                    restriction_diagnostics: audit,
+                    blocked_way_ids: excluded.into_iter().collect(),
+                    ..Default::default()
+                };
+                return Ok((graph, report));
+            }
+            Err(mut error) => {
+                error.report.policy = options.invalid_restrictions;
+                error.report.source_snapshot = osm.snapshot;
+                if options.invalid_restrictions == InvalidRestrictionPolicy::Reject
+                    || error.report.restriction_diagnostics.is_empty()
+                {
+                    audit.append(&mut error.report.restriction_diagnostics);
+                    error.report.restriction_diagnostics = audit;
+                    error.report.blocked_way_ids = excluded.into_iter().collect();
+                    return Err(error);
+                }
+                if audit.len() + error.report.restriction_diagnostics.len() > 256 {
+                    return Err(DataError::LimitExceeded.into());
+                }
+                let before = excluded.len();
+                for d in &mut error.report.restriction_diagnostics {
+                    // Only a complete from/to way can safely stop the affected
+                    // movement. A relation-only or unknown member is not guessed.
+                    let rel = osm
+                        .relations
+                        .iter()
+                        .find(|r| r.id == d.relation_id)
+                        .ok_or_else(|| invalid("relation identity"))?;
+                    if !rel.members.iter().any(|m| {
+                        m.kind == 1
+                            && matches!(m.role.as_str(), "from" | "to")
+                            && osm.ways.contains_key(&m.id)
+                    }) {
+                        return Err(error);
+                    }
+                    for m in &rel.members {
+                        if m.kind == 1 && osm.ways.contains_key(&m.id) {
+                            excluded.insert(m.id);
+                        }
+                    }
+                    d.action = "blocked_ways".into();
+                }
+                audit.append(&mut error.report.restriction_diagnostics);
+                if before == excluded.len() {
+                    return Err(invalid("restriction blocking made no progress"));
+                }
             }
         }
-        if entered && index + 1 < ways.len() && edges[next].way == ways[index + 1] {
-            let mut p = path.clone();
-            p.push(next);
-            if index + 1 == ways.len() - 1 {
-                out.push(p);
-            } else {
-                restriction_paths(edges, outgoing, ways, index + 1, p, true, out, work)?;
-            }
-        }
     }
-    Ok(())
 }
-pub fn build(input: &Path, output: &Path) -> Result<Manifest> {
-    if input == output {
+fn input(input: &Path, options: BuildOptions) -> Result<(Graph, InputReport)> {
+    let input_error = |source| Error {
+        source,
+        report: Box::new(InputReport {
+            policy: options.invalid_restrictions,
+            failure_code: Some("InputReadError".into()),
+            ..Default::default()
+        }),
+    };
+    if std::fs::metadata(input)
+        .map_err(|e| input_error(DataError::Io(e)))?
+        .len()
+        > 512 * 1024 * 1024
+    {
+        return Err(input_error(DataError::LimitExceeded));
+    }
+    let source = routeweft_dataset::hash_file(input).map_err(input_error)?;
+    let result = (|| {
+        let osm = pbf::read(input).map_err(|e| {
+            let mut error = Error::from(e);
+            error.report.failure_code = Some("PbfReadError".into());
+            error
+        })?;
+        if routeweft_dataset::hash_file(input)? != source {
+            return Err(invalid("input changed while reading"));
+        }
+        prepare(&osm, options)
+    })();
+    match result {
+        Ok((graph, mut report)) => {
+            report.source_sha256 = source;
+            Ok((graph, report))
+        }
+        Err(mut error) => {
+            error.report.policy = options.invalid_restrictions;
+            error.report.source_sha256 = source;
+            if error.report.failure_code.is_none() {
+                error.report.failure_code = Some("GraphValidationError".into());
+            }
+            Err(error)
+        }
+    }
+}
+pub fn preflight(input_path: &Path, options: BuildOptions) -> Result<InputReport> {
+    input(input_path, options).map(|(_, report)| report)
+}
+pub fn build_with_options(
+    input_path: &Path,
+    output: &Path,
+    options: BuildOptions,
+) -> Result<(Manifest, InputReport)> {
+    if input_path == output {
         return Err(invalid("input and output must differ"));
     }
-    if std::fs::metadata(input)?.len() > 512 * 1024 * 1024 {
-        return Err(Error::LimitExceeded);
-    }
-    let source = routeweft_dataset::hash_file(input)?;
-    let osm = pbf::read(input)?;
-    if routeweft_dataset::hash_file(input)? != source {
-        return Err(invalid("input changed while building"));
-    }
-    let (graph, stats) = graph(&osm)?;
-    routeweft_dataset::write(output, &graph, source, osm.snapshot, stats)
+    let (graph, report) = input(input_path, options)?;
+    let manifest = routeweft_dataset::write(
+        output,
+        &graph,
+        report.source_sha256.clone(),
+        report.source_snapshot,
+        report.diagnostics.clone(),
+    )
+    .map_err(|source| {
+        let mut failed_report = report.clone();
+        failed_report.valid = false;
+        failed_report.failure_code = Some("DatasetWriteError".into());
+        Error {
+            source,
+            report: Box::new(failed_report),
+        }
+    })?;
+    Ok((manifest, report))
+}
+pub fn build(input_path: &Path, output: &Path) -> Result<Manifest> {
+    build_with_options(input_path, output, BuildOptions::default()).map(|(m, _)| m)
 }
