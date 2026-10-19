@@ -9,6 +9,10 @@ publish.workspace = true
 routeweft-domain.workspace = true
 routeweft-dataset.workspace = true
 flate2.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+routeweft-routing.workspace = true

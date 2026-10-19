@@ -206,6 +206,8 @@ dependencies = [
  "flate2",
  "routeweft-dataset",
  "routeweft-domain",
+ "routeweft-routing",
+ "serde",
 ]
 
 [[package]]
