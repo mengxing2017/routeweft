@@ -46,38 +46,27 @@ backend/target/release/routeweft route \
 
 当前是静态汽车子集，条件规则保守处理；CLI 输入 PBF 上限为 512 MiB，另有解码、对象和图容量限制，查询要求经纬跨度各不超过 5°。文件小于上限也不保证满足其他容量限制。优先使用城市级数据，不将省域、全国地图构建能力视作路由容量承诺。详见 [profile](driving-profile.md)、[数据格式](dataset-format.md) 和 [性能记录](performance.md)。
 
-## 与 map-build 配合
+## 消费者接入
 
-[map-build](https://github.com/mengxing2017/map-build)（本地项目名 `huavd-map-build`）也是独立的开源项目，可与 RouteWeft 复用同一份原始 PBF：
+外部构建工具可以调用 RouteWeft CLI，使用原始 OSM PBF 生成路由数据集；不要输入地图过滤后的 PBF、中间 GeoJSON 或 PMTiles。构建时固定源码提交、输入 SHA-256、profile 和显式策略，并保存构建与预检报告。命令和错误契约见 [CLI](cli.md)，数据集身份与完整性要求见 [数据集格式](dataset-format.md)。
 
-```text
-同一份城市 OSM PBF
-  ├─ map-build → PMTiles、地图样式及配套资源 → 地图展示
-  └─ RouteWeft → 路由数据集 → CLI / Rust API → 路线几何与指引
-```
+消费者负责工具锁定、区域配置、质量门、打包安装及更新流程。RouteWeft 提供路由能力，不维护消费者的代码、配置或发布流程。地图与路由配对时应记录地图版本、dataset_id 和源 PBF 哈希；构建日期不能代替实际数据快照。
 
-推荐在同一父目录分别检出 `routeweft` 与 `map-build`，数据放在独立目录。完成 map-build 自身 README 的环境准备后，在 RouteWeft 根目录执行下面的示例。`monaco` 是 map-build 当前区域目录中的 ID，PBF 路径需替换成实际的 Monaco 原始数据：
+## 城市输入预检与独立复核
+
+先运行 `routeweft preflight --input city.osm.pbf --profile driving --json`。转向限制失败时，使用关系 ID 对比原始输入与切片，见 [数据提取和排查](data-sources.md)。只有人工审核过覆盖损失后，才考虑 [显式保守模式](cli.md#限制关系诊断与显式保守模式)。默认严格失败不会改变。
+
+本项目提供独立验证脚本，需 Python 3.12+，使用显式本地文件，不下载数据。以下坐标及 policy 对应固定南宁切片，输出目录必须不存在；其他输入须替换成经过审核的成功与无路坐标：
 
 ```bash
-routeweft_source_pbf=/absolute/path/to/monaco.osm.pbf
-routeweft_map_workdir="$PWD/map-work"
-routeweft_build_date="$(date +%Y%m%d)"
-sha256sum "$routeweft_source_pbf"
-
-make -C ../map-build build REGION=monaco YYYYMMDD="$routeweft_build_date" \
-  INPUT="$routeweft_source_pbf" WORKDIR="$routeweft_map_workdir" ROLE=base
-make -C ../map-build verify REGION=monaco YYYYMMDD="$routeweft_build_date" \
-  WORKDIR="$routeweft_map_workdir" ROLE=base
-
-mkdir -p datasets
-backend/target/release/routeweft build --input "$routeweft_source_pbf" \
-  --profile driving --output ./datasets/monaco-driving-v1
-backend/target/release/routeweft verify --dataset ./datasets/monaco-driving-v1 --json
+python3 scripts/validate-city.py --binary backend/target/release/routeweft \
+  --input /absolute/path/to/nanning.osm.pbf --output /absolute/path/to/new-acceptance \
+  --invalid-restrictions block_ways \
+  --coordinates '108.32,22.82;108.33,22.82' \
+  --no-route '108.2532541,22.7745994;108.2534996,22.7738817' --no-route-radius-m 0.01
 ```
 
-上例展示输入复用方式，未执行整套地图构建验收。使用 map-build 已下载的数据时，向 RouteWeft 传入其原始 PBF 的绝对路径；不要传过滤后的中间数据或 `.pmtiles`。构建日期只是会话标识，不代表 OSM 数据快照，应另记录输入哈希与实际快照。
-
-两个工具当前分别构建和验证，尚无自动整合的发布包或安装协议。宿主可以在地图上绘制 RouteWeft 返回的路线几何；HTTP 接口、坐标交互、路由数据集安装和更新策略由消费者实现。需要联合分发时，在外层清单记录地图包版本、路由 dataset_id、两者输入哈希和数据快照，同时保留 OSM 署名及适用许可材料。
+脚本执行 version、preflight、重复 build、verify、成功 nearest/route、明确 NoRoute，以及自行生成的 ZIP/tar.gz 解包后重复检查。acceptance.json 保存每次命令的总耗时、可选 Linux VmHWM 采样、输入/工具身份、诊断与归档哈希。RSS 采样可能漏掉短峰值，不能当作精确峰值或资源隔离。生成的归档是独立复核用文件，不作为消费者的发布包或客户端安装包。
 
 ## 嵌入 Rust 应用
 

@@ -27,3 +27,11 @@ Engine 持有不可变图、R-tree 和限制自动机，允许 Arc 共享并发�
 错误枚举区分 InvalidInput、UnsupportedProfile、NoSegment、NoRoute、InvalidDataset、IncompatibleFormat、BudgetExceeded、Cancelled、CostOverflow 和 Io。查询 API 不 panic 终止宿主；资源申请仍受平台分配失败行为影响，应配合输入及部署限制。
 
 NodeEngine 保留节点级 P0 搜索，只有合成图用途，不提供持久格式或完整坐标语义。使用多个独立查询拼接不会继承转向历史；多途经点必须一次传给 Engine::route。
+
+## 构建宿主与预检
+
+构建宿主可依赖 `routeweft-preprocess`：`preflight(&Path, BuildOptions)` 返回 InputReport，不写数据集；`build_with_options(&Path, &Path, BuildOptions)` 返回 `(Manifest, InputReport)`。`prepare(&Osm, BuildOptions)` 用于已解码对象。默认 build/graph 使用 Reject，显式选项为 InvalidRestrictionPolicy::BlockWays。
+
+预处理错误类型为 `routeweft_preprocess::Error`，保留底层 source 和结构化 report；不再要求调用者解析 InvalidDataset 的文本。Relation 现在保留源 id；直接构造测试 OSM 时须提供唯一关系 ID。消费者应固定提交并重新编译，不能假定 0.x 内部类型向后兼容。
+
+InputReport 是构建审计，不是可传给查询引擎的路由图。保存它与输入/工具身份；Engine 仍加载原有 format=1 数据集。策略含义和诊断分类见 [CLI](cli.md)。

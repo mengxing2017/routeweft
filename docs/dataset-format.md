@@ -17,3 +17,27 @@ routeweft-v1\n{source_sha256}\n{profile}\n{builder}\n{graph_sha256}
 每个坐标合法且纬度绝对值≤85°；当前查询还要求经/纬跨度各≤5°。不兼容版本拒绝打开；未知图路径、哈希/字节数/计数不符、非法引用或直接符号链接均拒绝。校验检测损坏，不认证来源：有权整体重写 manifest 和 payload 的人可以生成另一份完整有效数据。
 
 写入先使用同父目录唯一临时目录，创建文件、sync、重新打开校验，再 rename 并同步父目录；不覆盖已有输出，不替换有效的非空数据集。宿主必须使用受控发布父目录，避免其他进程并发篡改文件或符号链接；本实现不是对抗拥有目录写权限者的文件系统沙箱。查询不会执行数据内脚本或下载内容。
+
+
+## 构建诊断计数
+
+manifest.diagnostics 为名称到整数的可扩展计数表，新增计数键不改变 format=1。图及 manifest 的必需结构没有变化，旧消费者仍需按原格式校验；未知 format/profile 不能因 CLI schema 相同而接受。
+
+| 计数 | 粒度与含义 |
+| --- | --- |
+| input_nodes/input_ways/input_relations | 解码后的输入对象数，不等于保留图数量 |
+| unsupported_way_class | 不在 driving 类别表内的 way 数，含无 highway 标签的 way |
+| blocked_nodes | 通行/条件/障碍物规则保守阻断的 node 数，一节点计一次 |
+| access_or_conditional_ways_blocked | 兼容保留的汇总 way 数；下列细分原因按首次匹配互斥计数 |
+| blocked_way_access/area/emergency_access/dimensions/conditional_restriction/conditional_tag | 对应访问、面、应急、物理尺寸、条件限制、道路条件标签的 way 数 |
+| reversible_ways_blocked | 可变方向规则排除的 way 数 |
+| zero_length_segments_omitted | 舍入为零长度的相邻节点段数，不是 way 数 |
+| conditional_restrictions_blocked | 适用于当前汽车模式的条件 relation 数，不是删除的 way 数 |
+| excepted_restrictions/other_mode_restrictions/non_driving_restrictions | 分别为 except 排除、其他模式、当前图无适用路径的 relation 数；不代表完整源数据校验 |
+| resolved_restrictions | 成功解析的静态 relation 数；多入口/出口展开后仍计一条 relation |
+| invalid_restrictions_blocked | 显式保守模式累计阻断的无效 relation 数 |
+| invalid_restriction_ways_blocked | 显式保守模式累计排除的不同源 way ID 数，含源中存在但本就不参与 driving 的成员 |
+
+只出现实际发生的可选计数键；未出现按零处理。input_* 与显式保守阻断计数固定输出。细分键在原汇总前添加 blocked_way_ 前缀，例如 blocked_way_dimensions。最终 report/manifest 的常规排除计数基于最终构图尝试，保守阻断计数累计整个迭代；二者不是同一个分母，不能直接相加当作全部输入。
+
+关系级 ID、标签、成员、失败原因和动作通过 build/preflight 的 report 输出，须由构建宿主随回执保存。示例验证脚本的 build-report.json 是附加审计材料，不是引擎加载必需文件，manifest 的图哈希也不认证该附加文件。区域告警阈值由真实输入审核制定，不统一要求零告警。

@@ -2,7 +2,7 @@
 
 基于 OpenStreetMap 的 Rust 离线路网构建与路由工具。提供可嵌入库及 `routeweft` CLI，不依赖外部路由运行时、数据库或业务服务。
 
-已实现城市级汽车子集：PBF 读取、保守通行规则、有向建图、静态 no/only 转向限制（via-node/via-way）、版本化数据集、道路吸附、2～10 个连续途经点的最快路及基本结构化指引。条件规则采取保守排除策略，不能解释为完整导航产品或完整汽车法规支持。支持范围和近似见 [profile 说明](docs/driving-profile.md)。
+已实现城市级汽车子集：PBF 读取、保守通行规则、有向建图、静态 no/only 转向限制（via-node/via-way）、版本化数据集、道路吸附、2～10 个连续途经点的最快路及基本结构化指引。条件规则采取保守排除策略，不能解释为完整导航产品或完整汽车法规支持。支持范围和近似见 [profile 说明](docs/driving-profile.md)。提供 `preflight` 输入预检和关系级限制诊断；无效限制默认拒绝，可显式选择排除受影响道路的保守模式。
 
 源码仓库：[mengxing2017/routeweft](https://github.com/mengxing2017/routeweft)。完整的获取、构建、真实数据查询及地图构建协作流程见 [使用指南](docs/usage.md)。
 
@@ -57,7 +57,7 @@ cargo doc --manifest-path backend/Cargo.toml --workspace --no-deps --locked
 
 ## 文档和发布边界
 
-- [使用指南与 map-build 协作](docs/usage.md)
+- [使用指南与消费者接入](docs/usage.md)
 - [CLI 与退出码](docs/cli.md)
 - [数据集格式](docs/dataset-format.md)
 - [架构](docs/architecture.md)与 [ADR 0002](docs/adr-0002-dataset-and-routing.md)
