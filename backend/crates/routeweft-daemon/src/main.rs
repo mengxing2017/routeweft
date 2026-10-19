@@ -5,18 +5,20 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR\nrouteweft inspect --dataset DIR [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
     message: String,
     code: u8,
+    details: Option<Box<routeweft_preprocess::InputReport>>,
 }
 fn bad(message: impl Into<String>) -> Failure {
     Failure {
         kind: "InvalidInput".into(),
         message: message.into(),
         code: 2,
+        details: None,
     }
 }
 fn data_error(error: routeweft_dataset::Error) -> Failure {
@@ -30,12 +32,21 @@ fn data_error(error: routeweft_dataset::Error) -> Failure {
         kind: kind.into(),
         message: error.to_string(),
         code: 4,
+        details: None,
     }
+}
+fn build_error(error: routeweft_preprocess::Error) -> Failure {
+    let message = error.to_string();
+    let mut failure = data_error(error.source);
+    failure.message = message;
+    failure.details = Some(error.report);
+    failure
 }
 fn query_error(error: routeweft_routing::Error) -> Failure {
     Failure {
         kind: format!("{error:?}"),
         message: error.to_string(),
+        details: None,
         code: match error {
             routeweft_routing::Error::InvalidInput
             | routeweft_routing::Error::UnsupportedProfile => 2,
@@ -60,12 +71,14 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     let command = &args[0];
     if !matches!(
         command.as_str(),
-        "build" | "inspect" | "verify" | "nearest" | "route"
+        "build" | "preflight" | "version" | "inspect" | "verify" | "nearest" | "route"
     ) {
         return Err(bad("unknown command"));
     }
     let allowed: &[&str] = match command.as_str() {
-        "build" => &["--input", "--profile", "--output"],
+        "build" => &["--input", "--profile", "--output", "--invalid-restrictions"],
+        "preflight" => &["--input", "--profile", "--invalid-restrictions"],
+        "version" => &[],
         "route" => &[
             "--dataset",
             "--coordinates",
@@ -117,21 +130,48 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             .copied()
             .ok_or_else(|| bad(format!("missing {key}")))
     };
-    if command == "build" {
+    if command == "version" {
+        return Ok(
+            json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
+            "cli_schema":1,"dataset_formats":[1],"profiles":["driving-v1"],
+            "commands":["build","preflight","inspect","verify","nearest","route","version"],
+            "invalid_restriction_policies":["reject","block_ways"]}),
+        );
+    }
+    if command == "build" || command == "preflight" {
         if required("--profile")? != "driving" {
             return Err(Failure {
                 kind: "UnsupportedProfile".into(),
                 message: "only driving is supported".into(),
                 code: 2,
+                details: None,
             });
         }
-        let m = routeweft_preprocess::build(
-            Path::new(required("--input")?),
+        let options = routeweft_preprocess::BuildOptions {
+            invalid_restrictions: match flags
+                .get("--invalid-restrictions")
+                .copied()
+                .unwrap_or("reject")
+            {
+                "reject" => routeweft_preprocess::InvalidRestrictionPolicy::Reject,
+                "block_ways" => routeweft_preprocess::InvalidRestrictionPolicy::BlockWays,
+                _ => return Err(bad("invalid restriction policy; use reject or block_ways")),
+            },
+        };
+        let input = Path::new(required("--input")?);
+        if command == "preflight" {
+            let report = routeweft_preprocess::preflight(input, options).map_err(build_error)?;
+            return Ok(json!({"schema":1,"status":"ok","report":report}));
+        }
+        let (m, report) = routeweft_preprocess::build_with_options(
+            input,
             Path::new(required("--output")?),
+            options,
         )
-        .map_err(data_error)?;
-        return Ok(json!({"schema":1,"status":"ok","manifest":m}));
+        .map_err(build_error)?;
+        return Ok(json!({"schema":1,"status":"ok","manifest":m,"report":report}));
     }
+
     let dataset = Path::new(required("--dataset")?);
     if command == "inspect" || command == "verify" {
         let (m, _) =
@@ -196,10 +236,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            println!(
-                "{}",
-                json!({"schema":1,"status":"error","error":{"kind":e.kind,"message":e.message}})
-            );
+            let mut value =
+                json!({"schema":1,"status":"error","error":{"kind":e.kind,"message":e.message}});
+            if let Some(report) = e.details {
+                value["error"]["details"] = json!(report);
+            }
+            println!("{value}");
             ExitCode::from(e.code)
         }
     }
