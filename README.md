@@ -4,18 +4,28 @@
 
 已实现城市级汽车子集：PBF 读取、保守通行规则、有向建图、静态 no/only 转向限制（via-node/via-way）、版本化数据集、道路吸附、2～10 个连续途经点的最快路及基本结构化指引。条件规则采取保守排除策略，不能解释为完整导航产品或完整汽车法规支持。支持范围和近似见 [profile 说明](docs/driving-profile.md)。
 
+源码仓库：[mengxing2017/routeweft](https://github.com/mengxing2017/routeweft)。完整的获取、构建、真实数据查询及地图构建协作流程见 [使用指南](docs/usage.md)。
+
 ## 快速开始
 
-使用 `rust-toolchain.toml` 指定的工具链，在仓库根目录执行：
+准备 Git、通过 rustup 管理的 Rust 工具链、系统 C 链接器及 Python 3。当前验证平台为 Linux；工具链版本由 `rust-toolchain.toml` 指定。首次构建需要下载工具链和 Cargo 依赖。
+
+```bash
+git clone https://github.com/mengxing2017/routeweft.git
+cd routeweft
+```
+
+在仓库根目录执行以下合成数据示例；每次使用新的临时目录：
 
 ```bash
 cargo build --manifest-path backend/Cargo.toml --release --locked
-python3 backend/testdata/generate_fixture.py /tmp/synthetic.osm.pbf --dense
-backend/target/release/routeweft build --input /tmp/synthetic.osm.pbf --profile driving --output /tmp/routeweft-synthetic
-backend/target/release/routeweft verify --dataset /tmp/routeweft-synthetic --json
-backend/target/release/routeweft inspect --dataset /tmp/routeweft-synthetic --json
-backend/target/release/routeweft nearest --dataset /tmp/routeweft-synthetic --coordinate '0.0005,0' --json
-backend/target/release/routeweft route --dataset /tmp/routeweft-synthetic --coordinates '0.0002,0;0.0008,0;0.002,0.0005' --json
+routeweft_demo_dir="$(mktemp -d)"
+python3 backend/testdata/generate_fixture.py "$routeweft_demo_dir/synthetic.osm.pbf" --dense
+backend/target/release/routeweft build --input "$routeweft_demo_dir/synthetic.osm.pbf" --profile driving --output "$routeweft_demo_dir/dataset"
+backend/target/release/routeweft verify --dataset "$routeweft_demo_dir/dataset" --json
+backend/target/release/routeweft inspect --dataset "$routeweft_demo_dir/dataset" --json
+backend/target/release/routeweft nearest --dataset "$routeweft_demo_dir/dataset" --coordinate '0.0005,0' --json
+backend/target/release/routeweft route --dataset "$routeweft_demo_dir/dataset" --coordinates '0.0002,0;0.0008,0;0.002,0.0005' --json
 ```
 
 输出目录必须不存在。真实城市使用显式提供的 `.osm.pbf` 替换合成输入，工具不会下载数据。完整数据来源和固定验证样本见 [数据说明](docs/data-sources.md)。
@@ -47,6 +57,7 @@ cargo doc --manifest-path backend/Cargo.toml --workspace --no-deps --locked
 
 ## 文档和发布边界
 
+- [使用指南与 map-build 协作](docs/usage.md)
 - [CLI 与退出码](docs/cli.md)
 - [数据集格式](docs/dataset-format.md)
 - [架构](docs/architecture.md)与 [ADR 0002](docs/adr-0002-dataset-and-routing.md)
@@ -55,4 +66,4 @@ cargo doc --manifest-path backend/Cargo.toml --workspace --no-deps --locked
 
 CH/MLD、全国性能、跨数据集拼接、实时交通、骑行步行、完整车道引导和移动定位播报不在支持范围。数据集检查不提供来源签名或身份认证。
 
-项目原创部分许可证仍待决定，所有 crate 保持 `publish=false`，尚未发布。复用代码、依赖及 OSM 数据分别遵循各自条件；已有 BSD 声明不等于整仓库采用 BSD。
+源码已托管到上述 GitHub 仓库，所有 crate 保持 `publish=false`；本文提供源码构建方式。当前仓库尚未声明项目原创部分的许可证。复用代码、依赖及 OSM 数据分别遵循各自条件；已有 BSD 声明不等于整仓库采用 BSD。
