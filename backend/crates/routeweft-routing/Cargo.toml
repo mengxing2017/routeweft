@@ -1,0 +1,16 @@
+[package]
+name = "routeweft-routing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+routeweft-dataset.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rstar.workspace = true
+routeweft-domain.workspace = true
+
+[lints]
+workspace = true

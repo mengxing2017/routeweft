@@ -1,0 +1,78 @@
+{
+  "date": "2026-10-19",
+  "dataset": {
+    "format": 1,
+    "dataset_id": "04b9c64776a9427b850483df99c57c482e3a014e5963c7f1e70476ae2b357a85",
+    "builder": "0.1.0",
+    "profile": "driving-v1",
+    "source_sha256": "36c0f0029ed838897322382611b67e8e5e7bcb07d5b17a25f3574dec54f1c23c",
+    "source_snapshot": 1457137562,
+    "attribution": "© OpenStreetMap contributors; ODbL 1.0; https://www.openstreetmap.org/copyright",
+    "graph_file": "graph.json",
+    "graph_sha256": "645a23aaf04d6f1beb831ac855883a188c3e9b78d40ea66e9111d15c5dce31a3",
+    "graph_bytes": 4454991,
+    "nodes": 15539,
+    "edges": 27145,
+    "restrictions": 35,
+    "diagnostics": {
+      "access_or_conditional_ways_blocked": 72,
+      "blocked_nodes": 45,
+      "resolved_restrictions": 27,
+      "unsupported_way_class": 25614,
+      "zero_length_segments_omitted": 1
+    }
+  },
+  "environment": {
+    "system": "Linux-6.6.143-amd64-desktop-hwe-x86_64-with-glibc2.38",
+    "machine": "x86_64",
+    "cpu": "Intel(R) Xeon(R) E-2278G CPU @ 3.40GHz",
+    "logical_cpus": 16,
+    "meminfo": "MemTotal:       65663396 kB",
+    "input_snapshot_utc": "2016-03-05T00:26:02+00:00"
+  },
+  "build": {
+    "elapsed_s": 0.17566965200239792,
+    "post_exec_vm_hwm_kb": 67216,
+    "rss_samples": 150
+  },
+  "dataset_bytes": 4455764,
+  "dataset_gzip_bytes": 422082,
+  "memory_probe": {
+    "after_queries": "VmHWM:\t   13068 kB\nVmRSS:\t   13068 kB",
+    "dataset_id": "04b9c64776a9427b850483df99c57c482e3a014e5963c7f1e70476ae2b357a85",
+    "load_ms": 33.932399000000004,
+    "loaded": "VmHWM:\t   11180 kB\nVmRSS:\t   11180 kB",
+    "od_count": 1000,
+    "status": {
+      "NoRoute": 154,
+      "ok": 846
+    }
+  },
+  "od": {
+    "count": 1000,
+    "status": {
+      "ok": 846,
+      "NoRoute": 154
+    },
+    "p95_ms": 5.8304860000000005,
+    "seed": 20261019
+  },
+  "load": {
+    "dataset_id": "04b9c64776a9427b850483df99c57c482e3a014e5963c7f1e70476ae2b357a85",
+    "load_ms": 35.004324000000004,
+    "measure_s": 300,
+    "nearest": {
+      "count": 1500,
+      "failures": 0,
+      "p95_ms": 2.84825
+    },
+    "qps_per_operation": 5,
+    "queue_included": true,
+    "route": {
+      "count": 1500,
+      "failures": 239,
+      "p95_ms": 24.035093
+    },
+    "warmup_s": 30
+  }
+}

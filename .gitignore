@@ -1,0 +1,10 @@
+.devbox
+.vitepress/cache
+.DS_Store
+dist
+node_modules
+public/api
+.qoder
+target/
+.codebuddy/
+report

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.2/.schema/devbox.schema.json",
+  "nixpkgs": {
+    "commit": "205fd4226592cc83fd4c0885a3e4c9c400efabb5"
+  },
+  "packages": {
+    "rustup": "1.29.0",
+    "libiconv": "2.40",
+    "zig": "0.15.2",
+    "pnpm": "11.22.0",
+    "tmux": "3.7",
+    "tmuxinator": "3.4.1",
+    "jdk": "21.0.9+8",
+    "nodejs": "22.23.1",
+    "pkg-config": "0.29.2",
+    "openssl": {
+      "version": "3.6.0",
+      "outputs": [
+        "bin",
+        "dev",
+        "out"
+      ]
+    },
+    "glib": {
+      "outputs": [
+        "bin",
+        "dev",
+        "out"
+      ]
+    },
+    "gtk3": {
+      "outputs": [
+        "dev",
+        "out"
+      ]
+    },
+    "gdk-pixbuf": {
+      "outputs": [
+        "dev",
+        "out"
+      ]
+    },
+    "pango": {
+      "outputs": [
+        "bin",
+        "dev",
+        "out"
+      ]
+    },
+    "cairo": {
+      "outputs": [
+        "dev",
+        "out"
+      ]
+    },
+    "at-spi2-core": {
+      "outputs": [
+        "dev",
+        "out"
+      ]
+    },
+    "dbus": {
+      "outputs": [
+        "dev",
+        "lib",
+        "out"
+      ]
+    },
+    "libsoup_3": {
+      "outputs": [
+        "dev",
+        "out"
+      ]
+    },
+    "webkitgtk_4_1": {
+      "outputs": [
+        "dev",
+        "out"
+      ]
+    },
+    "github:NixOS/nixpkgs/205fd4226592cc83fd4c0885a3e4c9c400efabb5#mesa^out,drivers": {}
+  },
+  "shell": {
+    "init_hook": [
+      "rustup show active-toolchain",
+      "cargo fetch --manifest-path backend/Cargo.toml --locked"
+    ],
+    "scripts": {
+      "start": "cargo run --manifest-path backend/Cargo.toml -p routeweft-daemon --",
+      "test": "cargo test --manifest-path backend/Cargo.toml --workspace",
+      "build": "cargo build --manifest-path backend/Cargo.toml --workspace",
+      "build-docs": "cargo doc --manifest-path backend/Cargo.toml --workspace --no-deps",
+      "fmt": "cargo fmt --manifest-path backend/Cargo.toml --all",
+      "format": "cargo fmt --manifest-path backend/Cargo.toml --all",
+      "check": "cargo check --manifest-path backend/Cargo.toml --workspace",
+      "clippy": "cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings",
+      "ci": "make check",
+      "web": "pnpm --dir frontend dev",
+      "check-frontend": "make check-frontend"
+    }
+  }
+}

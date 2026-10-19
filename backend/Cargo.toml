@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/routeweft-domain", "crates/routeweft-daemon", "crates/routeweft-routing", "crates/routeweft-dataset", "crates/routeweft-preprocess"]
+default-members = ["crates/routeweft-daemon"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"
+flate2 = "=1.1.9"
+rstar = "=0.12.2"
+routeweft-dataset = { path = "crates/routeweft-dataset" }
+routeweft-preprocess = { path = "crates/routeweft-preprocess" }
+routeweft-routing = { path = "crates/routeweft-routing" }
+routeweft-domain = { path = "crates/routeweft-domain" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+debug = 1

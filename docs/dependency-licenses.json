@@ -1,0 +1,354 @@
+[
+  {
+    "name": "adler2",
+    "version": "2.0.1",
+    "license": "0BSD OR MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/adler2/2.0.1",
+    "notices": [
+      "LICENSES/dependencies/adler2-2.0.1/LICENSE-0BSD",
+      "LICENSES/dependencies/adler2-2.0.1/LICENSE-APACHE",
+      "LICENSES/dependencies/adler2-2.0.1/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "autocfg",
+    "version": "1.5.1",
+    "license": "Apache-2.0 OR MIT",
+    "source": "https://crates.io/crates/autocfg/1.5.1",
+    "notices": [
+      "LICENSES/dependencies/autocfg-1.5.1/LICENSE-APACHE",
+      "LICENSES/dependencies/autocfg-1.5.1/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "block-buffer",
+    "version": "0.10.4",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/block-buffer/0.10.4",
+    "notices": [
+      "LICENSES/dependencies/block-buffer-0.10.4/LICENSE-APACHE",
+      "LICENSES/dependencies/block-buffer-0.10.4/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "byteorder",
+    "version": "1.5.0",
+    "license": "Unlicense OR MIT",
+    "source": "https://crates.io/crates/byteorder/1.5.0",
+    "notices": [
+      "LICENSES/dependencies/byteorder-1.5.0/COPYING",
+      "LICENSES/dependencies/byteorder-1.5.0/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "cfg-if",
+    "version": "1.0.5",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/cfg-if/1.0.5",
+    "notices": [
+      "LICENSES/dependencies/cfg-if-1.0.5/LICENSE-APACHE",
+      "LICENSES/dependencies/cfg-if-1.0.5/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "cpufeatures",
+    "version": "0.2.17",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/cpufeatures/0.2.17",
+    "notices": [
+      "LICENSES/dependencies/cpufeatures-0.2.17/LICENSE-APACHE",
+      "LICENSES/dependencies/cpufeatures-0.2.17/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "crc32fast",
+    "version": "1.5.2",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/crc32fast/1.5.2",
+    "notices": [
+      "LICENSES/dependencies/crc32fast-1.5.2/LICENSE-APACHE",
+      "LICENSES/dependencies/crc32fast-1.5.2/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "crypto-common",
+    "version": "0.1.7",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/crypto-common/0.1.7",
+    "notices": [
+      "LICENSES/dependencies/crypto-common-0.1.7/LICENSE-APACHE",
+      "LICENSES/dependencies/crypto-common-0.1.7/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "digest",
+    "version": "0.10.7",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/digest/0.10.7",
+    "notices": [
+      "LICENSES/dependencies/digest-0.10.7/LICENSE-APACHE",
+      "LICENSES/dependencies/digest-0.10.7/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "flate2",
+    "version": "1.1.9",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/flate2/1.1.9",
+    "notices": [
+      "LICENSES/dependencies/flate2-1.1.9/LICENSE-APACHE",
+      "LICENSES/dependencies/flate2-1.1.9/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "generic-array",
+    "version": "0.14.7",
+    "license": "MIT",
+    "source": "https://crates.io/crates/generic-array/0.14.7",
+    "notices": [
+      "LICENSES/dependencies/generic-array-0.14.7/LICENSE"
+    ]
+  },
+  {
+    "name": "hash32",
+    "version": "0.3.1",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/hash32/0.3.1",
+    "notices": [
+      "LICENSES/dependencies/hash32-0.3.1/LICENSE-APACHE",
+      "LICENSES/dependencies/hash32-0.3.1/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "heapless",
+    "version": "0.8.0",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/heapless/0.8.0",
+    "notices": [
+      "LICENSES/dependencies/heapless-0.8.0/LICENSE-APACHE",
+      "LICENSES/dependencies/heapless-0.8.0/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "itoa",
+    "version": "1.0.18",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/itoa/1.0.18",
+    "notices": [
+      "LICENSES/dependencies/itoa-1.0.18/LICENSE-APACHE",
+      "LICENSES/dependencies/itoa-1.0.18/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "libc",
+    "version": "0.2.190",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/libc/0.2.190",
+    "notices": [
+      "LICENSES/dependencies/libc-0.2.190/LICENSE-APACHE",
+      "LICENSES/dependencies/libc-0.2.190/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "libm",
+    "version": "0.2.16",
+    "license": "MIT",
+    "source": "https://crates.io/crates/libm/0.2.16",
+    "notices": [
+      "LICENSES/dependencies/libm-0.2.16/LICENSE.txt"
+    ]
+  },
+  {
+    "name": "memchr",
+    "version": "2.8.3",
+    "license": "Unlicense OR MIT",
+    "source": "https://crates.io/crates/memchr/2.8.3",
+    "notices": [
+      "LICENSES/dependencies/memchr-2.8.3/COPYING",
+      "LICENSES/dependencies/memchr-2.8.3/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "miniz_oxide",
+    "version": "0.8.9",
+    "license": "MIT OR Zlib OR Apache-2.0",
+    "source": "https://crates.io/crates/miniz_oxide/0.8.9",
+    "notices": [
+      "LICENSES/dependencies/miniz_oxide-0.8.9/LICENSE",
+      "LICENSES/dependencies/miniz_oxide-0.8.9/LICENSE-APACHE.md",
+      "LICENSES/dependencies/miniz_oxide-0.8.9/LICENSE-MIT.md",
+      "LICENSES/dependencies/miniz_oxide-0.8.9/LICENSE-ZLIB.md"
+    ]
+  },
+  {
+    "name": "num-traits",
+    "version": "0.2.19",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/num-traits/0.2.19",
+    "notices": [
+      "LICENSES/dependencies/num-traits-0.2.19/LICENSE-APACHE",
+      "LICENSES/dependencies/num-traits-0.2.19/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "proc-macro2",
+    "version": "1.0.107",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/proc-macro2/1.0.107",
+    "notices": [
+      "LICENSES/dependencies/proc-macro2-1.0.107/LICENSE-APACHE",
+      "LICENSES/dependencies/proc-macro2-1.0.107/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "quote",
+    "version": "1.0.47",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/quote/1.0.47",
+    "notices": [
+      "LICENSES/dependencies/quote-1.0.47/LICENSE-APACHE",
+      "LICENSES/dependencies/quote-1.0.47/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "rstar",
+    "version": "0.12.2",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/rstar/0.12.2",
+    "notices": [
+      "LICENSES/dependencies/rstar-0.12.2/LICENSE-MIT"
+    ],
+    "license_text_source": "https://raw.githubusercontent.com/georust/rstar/v0.12.2/LICENSE-MIT",
+    "selected_alternative": "MIT"
+  },
+  {
+    "name": "serde",
+    "version": "1.0.228",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/serde/1.0.228",
+    "notices": [
+      "LICENSES/dependencies/serde-1.0.228/LICENSE-APACHE",
+      "LICENSES/dependencies/serde-1.0.228/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "serde_core",
+    "version": "1.0.228",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/serde_core/1.0.228",
+    "notices": [
+      "LICENSES/dependencies/serde_core-1.0.228/LICENSE-APACHE",
+      "LICENSES/dependencies/serde_core-1.0.228/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "serde_derive",
+    "version": "1.0.228",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/serde_derive/1.0.228",
+    "notices": [
+      "LICENSES/dependencies/serde_derive-1.0.228/LICENSE-APACHE",
+      "LICENSES/dependencies/serde_derive-1.0.228/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "serde_json",
+    "version": "1.0.150",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/serde_json/1.0.150",
+    "notices": [
+      "LICENSES/dependencies/serde_json-1.0.150/LICENSE-APACHE",
+      "LICENSES/dependencies/serde_json-1.0.150/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "sha2",
+    "version": "0.10.9",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/sha2/0.10.9",
+    "notices": [
+      "LICENSES/dependencies/sha2-0.10.9/LICENSE-APACHE",
+      "LICENSES/dependencies/sha2-0.10.9/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "simd-adler32",
+    "version": "0.3.10",
+    "license": "MIT",
+    "source": "https://crates.io/crates/simd-adler32/0.3.10",
+    "notices": [
+      "LICENSES/dependencies/simd-adler32-0.3.10/LICENSE.md"
+    ]
+  },
+  {
+    "name": "smallvec",
+    "version": "1.16.2",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/smallvec/1.16.2",
+    "notices": [
+      "LICENSES/dependencies/smallvec-1.16.2/LICENSE-APACHE",
+      "LICENSES/dependencies/smallvec-1.16.2/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "stable_deref_trait",
+    "version": "1.2.1",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/stable_deref_trait/1.2.1",
+    "notices": [
+      "LICENSES/dependencies/stable_deref_trait-1.2.1/LICENSE-APACHE",
+      "LICENSES/dependencies/stable_deref_trait-1.2.1/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "syn",
+    "version": "2.0.119",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/syn/2.0.119",
+    "notices": [
+      "LICENSES/dependencies/syn-2.0.119/LICENSE-APACHE",
+      "LICENSES/dependencies/syn-2.0.119/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "typenum",
+    "version": "1.20.1",
+    "license": "MIT OR Apache-2.0",
+    "source": "https://crates.io/crates/typenum/1.20.1",
+    "notices": [
+      "LICENSES/dependencies/typenum-1.20.1/LICENSE",
+      "LICENSES/dependencies/typenum-1.20.1/LICENSE-APACHE",
+      "LICENSES/dependencies/typenum-1.20.1/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "unicode-ident",
+    "version": "1.0.26",
+    "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+    "source": "https://crates.io/crates/unicode-ident/1.0.26",
+    "notices": [
+      "LICENSES/dependencies/unicode-ident-1.0.26/LICENSE-APACHE",
+      "LICENSES/dependencies/unicode-ident-1.0.26/LICENSE-MIT",
+      "LICENSES/dependencies/unicode-ident-1.0.26/LICENSE-UNICODE"
+    ]
+  },
+  {
+    "name": "version_check",
+    "version": "0.9.5",
+    "license": "MIT/Apache-2.0",
+    "source": "https://crates.io/crates/version_check/0.9.5",
+    "notices": [
+      "LICENSES/dependencies/version_check-0.9.5/LICENSE-APACHE",
+      "LICENSES/dependencies/version_check-0.9.5/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "zmij",
+    "version": "1.0.23",
+    "license": "MIT",
+    "source": "https://crates.io/crates/zmij/1.0.23",
+    "notices": [
+      "LICENSES/dependencies/zmij-1.0.23/LICENSE-MIT"
+    ]
+  }
+]

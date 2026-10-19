@@ -1,0 +1,31 @@
+.PHONY: check check-backend check-frontend fmt fmt-check test build backend-dev web-dev
+
+check: check-backend check-frontend
+
+check-backend: fmt-check
+	python3 scripts/check-licenses.py
+	cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
+	cargo test --manifest-path backend/Cargo.toml --workspace
+
+check-frontend:
+	pnpm --dir frontend typecheck
+	pnpm --dir frontend build
+
+fmt:
+	cargo fmt --manifest-path backend/Cargo.toml --all
+
+fmt-check:
+	cargo fmt --manifest-path backend/Cargo.toml --all -- --check
+
+test:
+	cargo test --manifest-path backend/Cargo.toml --workspace
+
+build:
+	cargo build --manifest-path backend/Cargo.toml --workspace
+	pnpm --dir frontend build
+
+backend-dev:
+	cargo run --manifest-path backend/Cargo.toml -p routeweft-daemon -- $(ARGS)
+
+web-dev:
+	pnpm --dir frontend dev
