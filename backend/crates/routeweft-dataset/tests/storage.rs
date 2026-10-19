@@ -5,9 +5,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 fn temp() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "routeweft-storage-{}-{}",
+        "routeweft-storage-{}-{}-{}",
         std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 fn graph() -> Graph {
