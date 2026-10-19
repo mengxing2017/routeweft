@@ -16,9 +16,19 @@ fn command(args: &[&str]) -> (i32, Value) {
         serde_json::from_slice(&out.stdout).unwrap(),
     )
 }
+fn temp(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
 #[test]
 fn generated_pbf_to_cli_route_and_corrupt_input() {
-    let root = std::env::temp_dir().join(format!("routeweft-cli-{}", std::process::id()));
+    let root = temp("routeweft-cli");
     std::fs::create_dir_all(&root).unwrap();
     let script =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
@@ -119,5 +129,150 @@ fn generated_pbf_to_cli_route_and_corrupt_input() {
         assert_eq!(code, 2);
         assert_eq!(error["error"]["kind"], "InvalidInput");
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn preflight_reports_real_relation_identity_without_publishing_a_dataset() {
+    let root = temp("routeweft-preflight");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("relation.pbf");
+    let output = root.join("must-not-exist");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    for (case, expected) in [
+        ("missing-via", "MissingVia"),
+        ("missing-reference", "MissingReference"),
+        ("valid", ""),
+    ] {
+        let generated = Command::new("python3")
+            .arg(&script)
+            .arg(&input)
+            .args(["--restriction-case", case])
+            .output()
+            .unwrap();
+        assert!(generated.status.success());
+        for cmd in ["build", "preflight"] {
+            let mut args = vec![
+                cmd,
+                "--input",
+                input.to_str().unwrap(),
+                "--profile",
+                "driving",
+            ];
+            if cmd == "build" {
+                args.extend(["--output", output.to_str().unwrap()]);
+            }
+            let (code, value) = command(&args);
+            if case == "valid" {
+                assert_eq!(code, 0, "{value}");
+                assert!(value["report"]["valid"].as_bool().unwrap());
+                assert_eq!(
+                    value["report"]["restriction_diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    0
+                );
+                if cmd == "build" {
+                    std::fs::remove_dir_all(&output).unwrap();
+                }
+            } else {
+                assert_eq!(code, 4, "{value}");
+                assert_eq!(value["error"]["kind"], "InvalidDataset");
+                assert_eq!(
+                    value["error"]["details"]["failure_code"],
+                    "InvalidRestriction"
+                );
+                let d = &value["error"]["details"]["restriction_diagnostics"][0];
+                assert_eq!(d["relation_id"], 6843783);
+                assert_eq!(d["code"], expected);
+                assert!(!output.exists());
+            }
+        }
+    }
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::write(output.join("sentinel"), b"keep").unwrap();
+    let (code, value) = command(&[
+        "build",
+        "--input",
+        input.to_str().unwrap(),
+        "--profile",
+        "driving",
+        "--output",
+        output.to_str().unwrap(),
+        "--invalid-restrictions",
+        "block_ways",
+    ]);
+    assert_eq!(code, 4);
+    assert_eq!(
+        value["error"]["details"]["failure_code"],
+        "DatasetWriteError"
+    );
+    assert_eq!(value["error"]["details"]["policy"], "block_ways");
+    assert_eq!(
+        value["error"]["details"]["source_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(std::fs::read(output.join("sentinel")).unwrap(), b"keep");
+    let (code, version) = command(&["version", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(version["dataset_formats"][0], 1);
+    let (code, _) = command(&["version", "--input", "bad"]);
+    assert_eq!(code, 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn conservative_cli_policy_is_explicit_and_preserves_auditable_warnings() {
+    let root = temp("routeweft-block-cli");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("relation.pbf");
+    let output = root.join("dataset");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    // This fixture blocks every road: conservative mode must fail closed,
+    // rather than emit an empty graph or fall back to unrestricted roads.
+    let generated = Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--restriction-case", "missing-via"])
+        .output()
+        .unwrap();
+    assert!(generated.status.success());
+    let (code, value) = command(&[
+        "build",
+        "--input",
+        input.to_str().unwrap(),
+        "--profile",
+        "driving",
+        "--output",
+        output.to_str().unwrap(),
+        "--invalid-restrictions",
+        "block_ways",
+    ]);
+    assert_eq!(code, 4, "{value}");
+    assert!(!output.exists());
+    assert_eq!(
+        value["error"]["details"]["blocked_way_ids"],
+        serde_json::json!([10, 20])
+    );
+    assert_eq!(
+        value["error"]["details"]["restriction_diagnostics"][0]["action"],
+        "blocked_ways"
+    );
+    let (code, _) = command(&[
+        "preflight",
+        "--input",
+        input.to_str().unwrap(),
+        "--profile",
+        "driving",
+        "--invalid-restrictions",
+        "ignore",
+    ]);
+    assert_eq!(code, 2);
     std::fs::remove_dir_all(root).unwrap();
 }
