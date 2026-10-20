@@ -6,25 +6,36 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 pub type Tags = BTreeMap<String, String>;
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub id: i64,
     pub point: Point,
     pub tags: Tags,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Way {
     pub id: i64,
     pub refs: Vec<i64>,
     pub tags: Tags,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Member {
     pub id: i64,
     pub kind: u64,
     pub role: String,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Relation {
     pub id: i64,
     pub members: Vec<Member>,
     pub tags: Tags,
+}
+/// A decoder destination. Returning an error stops decoding immediately.
+/// Implementations must perform their own global duplicate-ID validation.
+pub(crate) trait RecordSink {
+    fn node(&mut self, node: Node) -> Result<()>;
+    fn way(&mut self, way: Way) -> Result<()>;
+    fn relation(&mut self, relation: Relation) -> Result<()>;
 }
 #[derive(Default)]
 pub struct Osm {
@@ -259,14 +270,21 @@ fn driving_way_tag(key: &str) -> bool {
                     .is_some_and(|suffix| suffix.starts_with(':'))
         })
 }
-fn insert_way(osm: &mut Osm, mut way: Way) -> Result<()> {
+#[cfg(test)]
+fn insert_way(osm: &mut Osm, way: Way) -> Result<()> {
+    emit_way(osm, way, &mut None)
+}
+fn emit_way(osm: &mut Osm, mut way: Way, sink: &mut Option<&mut dyn RecordSink>) -> Result<()> {
     osm.charge(128 + way.refs.len() * 8 + tag_bytes(&way.tags))?;
     osm.counts[1] += 1;
-    if osm.scan_only {
+    if osm.scan_only && sink.is_none() {
         return Ok(());
     }
     if osm.driving_projection {
         retain_tags(&mut way.tags, driving_way_tag);
+    }
+    if let Some(sink) = sink.as_deref_mut() {
+        return sink.way(way);
     }
     // Even unsupported ways retain their references: restriction diagnostics
     // distinguish missing nodes from roads excluded by the profile.
@@ -283,10 +301,14 @@ fn project_relation(relation: &mut Relation) {
         retain_tags(&mut relation.tags, |key| key == "type");
     }
 }
-fn insert_node(osm: &mut Osm, mut node: Node) -> Result<()> {
+#[cfg(test)]
+fn insert_node(osm: &mut Osm, node: Node) -> Result<()> {
+    emit_node(osm, node, &mut None)
+}
+fn emit_node(osm: &mut Osm, mut node: Node, sink: &mut Option<&mut dyn RecordSink>) -> Result<()> {
     osm.charge(128 + tag_bytes(&node.tags))?;
     osm.counts[0] += 1;
-    if osm.scan_only {
+    if osm.scan_only && sink.is_none() {
         return Ok(());
     }
     if osm.driving_projection {
@@ -297,12 +319,23 @@ fn insert_node(osm: &mut Osm, mut node: Node) -> Result<()> {
             ) || key.contains(":conditional")
         });
     }
+    if let Some(sink) = sink.as_deref_mut() {
+        return sink.node(node);
+    }
     if osm.nodes.insert(node.id, node).is_some() {
         return Err(invalid("duplicate node"));
     }
     Ok(())
 }
+#[cfg(test)]
 fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
+    primitive_sink(bytes, osm, &mut None)
+}
+fn primitive_sink(
+    bytes: &[u8],
+    osm: &mut Osm,
+    sink: &mut Option<&mut dyn RecordSink>,
+) -> Result<()> {
     let f = fields(bytes)?;
     let table = fields(blob(&f, 1)?)?
         .into_iter()
@@ -340,7 +373,7 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                         )?,
                         tags: tags(&v, &table)?,
                     };
-                    insert_node(osm, node)?;
+                    emit_node(osm, node, sink)?;
                 }
                 2 => {
                     let ids = delta(packed(&v, 1)?)?;
@@ -373,13 +406,14 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                                 }
                             }
                         }
-                        insert_node(
+                        emit_node(
                             osm,
                             Node {
                                 id,
                                 point: point(lon, lat, gran, lon_offset, lat_offset)?,
                                 tags,
                             },
+                            sink,
                         )?;
                     }
                     if pos != kv.len() {
@@ -392,7 +426,7 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                         refs: delta(packed(&v, 8)?)?,
                         tags: tags(&v, &table)?,
                     };
-                    insert_way(osm, way)?;
+                    emit_way(osm, way, sink)?;
                 }
                 4 => {
                     let relation_id = int(&v, 1, None)? as i64;
@@ -431,7 +465,7 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                             + members.iter().map(|m| 64 + m.role.len()).sum::<usize>(),
                     )?;
                     osm.counts[2] += 1;
-                    if !osm.scan_only {
+                    if !osm.scan_only || sink.is_some() {
                         let mut relation = Relation {
                             id: relation_id,
                             members,
@@ -440,7 +474,11 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                         if osm.driving_projection {
                             project_relation(&mut relation);
                         }
-                        osm.relations.push(relation);
+                        if let Some(sink) = sink.as_deref_mut() {
+                            sink.relation(relation)?;
+                        } else {
+                            osm.relations.push(relation);
+                        }
                     }
                 }
                 _ => {}
@@ -503,6 +541,22 @@ pub(crate) fn read_for_driving(path: &Path) -> Result<Osm> {
     read_mode(path, false, true)
 }
 fn read_mode(path: &Path, scan_only: bool, driving_projection: bool) -> Result<Osm> {
+    decode(path, scan_only, driving_projection, None)
+}
+/// Decode projected records without retaining global maps or identity sets.
+pub(crate) fn read_to_sink(
+    path: &Path,
+    sink: &mut dyn RecordSink,
+) -> Result<([u64; 3], Option<i64>)> {
+    let osm = decode(path, true, true, Some(sink))?;
+    Ok((osm.counts, osm.snapshot))
+}
+fn decode(
+    path: &Path,
+    scan_only: bool,
+    driving_projection: bool,
+    mut sink: Option<&mut dyn RecordSink>,
+) -> Result<Osm> {
     let mut input = std::fs::File::open(path)?;
     if input.metadata()?.len() > 512 * 1024 * 1024 {
         return Err(resource_limit(
@@ -608,7 +662,7 @@ fn read_mode(path: &Path, scan_only: bool, driving_projection: bool) -> Result<O
                 if !header {
                     return Err(invalid("missing OSM header"));
                 }
-                primitive(&raw, &mut osm)?;
+                primitive_sink(&raw, &mut osm, &mut sink)?;
             }
             _ => return Err(invalid("unsupported block")),
         }
@@ -623,6 +677,18 @@ fn read_mode(path: &Path, scan_only: bool, driving_projection: bool) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct Discard;
+    impl RecordSink for Discard {
+        fn node(&mut self, _: Node) -> Result<()> {
+            Ok(())
+        }
+        fn way(&mut self, _: Way) -> Result<()> {
+            Ok(())
+        }
+        fn relation(&mut self, _: Relation) -> Result<()> {
+            Ok(())
+        }
+    }
     #[test]
     fn way_projection_preserves_profile_restrictions_and_full_budget() {
         for (key, val) in [
@@ -786,6 +852,16 @@ mod tests {
                 };
                 assert_eq!(primitive(&block, &mut full).is_ok(), failure == 0);
                 assert_eq!(primitive(&block, &mut projected).is_ok(), failure == 0);
+                let mut accounting = Osm {
+                    scan_only: true,
+                    driving_projection: true,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    primitive_sink(&block, &mut accounting, &mut Some(&mut Discard)).is_ok(),
+                    failure == 0
+                );
+                assert!(accounting.relations.is_empty() && accounting.relation_ids.is_empty());
                 if failure == 0 {
                     assert_eq!(full.estimated_bytes, projected.estimated_bytes);
                     assert_eq!(full.relations[0].members.len(), 1);
@@ -841,6 +917,17 @@ mod tests {
                 };
                 assert_eq!(primitive(&primitive_block, &mut full).is_ok(), valid);
                 assert_eq!(primitive(&primitive_block, &mut projected).is_ok(), valid);
+                let mut accounting = Osm {
+                    scan_only: true,
+                    driving_projection: true,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    primitive_sink(&primitive_block, &mut accounting, &mut Some(&mut Discard))
+                        .is_ok(),
+                    valid
+                );
+                assert!(accounting.nodes.is_empty());
                 if valid {
                     assert_eq!(full.nodes[&1].tags["name"], "label");
                     assert!(projected.nodes[&1].tags.is_empty());
