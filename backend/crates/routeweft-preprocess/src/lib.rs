@@ -93,6 +93,31 @@ pub fn graph(osm: &Osm) -> Result<(Graph, BTreeMap<String, u64>)> {
     let (graph, report) = prepare(osm, BuildOptions::default())?;
     Ok((graph, report.diagnostics))
 }
+// Include every way member, even an unknown role: resolve uses all members to
+// decide relevance before diagnosing malformed restriction shapes. Empty entries
+// are removed after edge construction, so an excluded/missing way is not retained.
+fn restriction_way_index(osm: &Osm) -> BTreeMap<i64, Vec<usize>> {
+    let mut index = BTreeMap::new();
+    let mut relations = osm
+        .relations
+        .iter()
+        .filter(|rel| restrictions::applies(rel) && !restrictions::conditional(rel))
+        .peekable();
+    if relations.peek().is_none() {
+        return index;
+    }
+    // Decoder-created maps have matching identities. Preserve the borrowed API's
+    // existing diagnostics even for manually assembled maps with mismatched keys.
+    let identities_match = osm.ways.iter().all(|(id, way)| *id == way.id);
+    for rel in relations {
+        for member in rel.members.iter().filter(|member| {
+            member.kind == 1 && (!identities_match || osm.ways.contains_key(&member.id))
+        }) {
+            index.entry(member.id).or_insert_with(Vec::new);
+        }
+    }
+    index
+}
 fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap<String, u64>)> {
     let mut stats = BTreeMap::from([
         ("input_nodes".into(), osm.nodes.len() as u64),
@@ -239,8 +264,9 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
         }
     }
     let mut edges = Vec::new();
-    let mut by_way: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    let mut by_way = restriction_way_index(osm);
     for (way, direction, forward, backward) in selected {
+        let mut restriction_edges = by_way.get_mut(&way.id);
         for pair in way.refs.windows(2) {
             if blocked.contains(&pair[0]) || blocked.contains(&pair[1]) {
                 continue;
@@ -287,7 +313,9 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
                     )
                     .into());
                 }
-                by_way.entry(way.id).or_default().push(edges.len());
+                if let Some(ids) = &mut restriction_edges {
+                    ids.push(edges.len());
+                }
                 edges.push(Edge {
                     from,
                     to,
@@ -306,7 +334,12 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
     }
     drop(blocked);
     drop(conditional_ways);
-    let outgoing = Adjacency::new(nodes.len(), &edges)?;
+    by_way.retain(|_, ids| !ids.is_empty());
+    // With no retained static restriction members, every resolve call would
+    // return None before accessing adjacency. Do not allocate that index.
+    let outgoing = (!by_way.is_empty())
+        .then(|| Adjacency::new(nodes.len(), &edges))
+        .transpose()?;
     let mut forbidden = BTreeSet::new();
     let mut only: BTreeMap<Vec<usize>, BTreeSet<usize>> = BTreeMap::new();
     let mut failures = Vec::new();
@@ -329,7 +362,10 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
         if restrictions::conditional(rel) {
             continue;
         }
-        match restrictions::resolve(rel, osm, &mapping, &by_way, &edges, &outgoing) {
+        let resolved = outgoing.as_ref().map_or(Ok(None), |outgoing| {
+            restrictions::resolve(rel, osm, &mapping, &by_way, &edges, outgoing)
+        });
+        match resolved {
             Ok(Some((rule, sequences))) => {
                 for sequence in sequences {
                     if rule.starts_with("only_") {
@@ -369,6 +405,9 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
     // Union allowed exits for identical only-prefixes before generating exclusions.
     for (prefix, allowed) in only {
         let last = *prefix.last().ok_or_else(|| invalid("only prefix"))?;
+        let outgoing = outgoing
+            .as_ref()
+            .ok_or_else(|| invalid("only restriction without adjacency"))?;
         for &next in &outgoing[edges[last].to] {
             if !allowed.contains(&next) {
                 let mut seq = prefix.clone();
@@ -544,4 +583,157 @@ pub fn build_with_options(
 }
 pub fn build(input_path: &Path, output: &Path) -> Result<Manifest> {
     build_with_options(input_path, output, BuildOptions::default()).map(|(m, _)| m)
+}
+
+#[cfg(test)]
+mod restriction_index_tests {
+    use super::*;
+    use pbf::{Member, Node, Relation, Way};
+
+    #[test]
+    fn sparse_index_matches_full_index_resolution_including_malformed_members() {
+        for case in [
+            "static",
+            "miskeyed",
+            "missing",
+            "unknown_role",
+            "excluded",
+            "excluded_only",
+            "unsupported",
+            "conditional",
+            "excepted",
+            "other_mode",
+            "nonrestriction",
+        ] {
+            let mut osm = Osm::default();
+            for id in 1..=5 {
+                osm.nodes.insert(
+                    id,
+                    Node {
+                        id,
+                        point: Point {
+                            lon: id as f64 * 0.001,
+                            lat: 0.,
+                        },
+                        tags: Tags::new(),
+                    },
+                );
+            }
+            for (id, refs, highway) in [
+                (10, vec![1, 2], "residential"),
+                (20, vec![2, 3], "residential"),
+                (30, vec![4, 5], "footway"),
+                (40, vec![2, 4], "residential"),
+            ] {
+                osm.ways.insert(
+                    id,
+                    Way {
+                        id,
+                        refs,
+                        tags: Tags::from([("highway".into(), highway.into())]),
+                    },
+                );
+            }
+            let (g, _) = graph(&osm).unwrap();
+            let mut rel = Relation {
+                id: 100,
+                tags: Tags::from([
+                    ("type".into(), "restriction".into()),
+                    ("restriction".into(), "only_straight_on".into()),
+                ]),
+                members: [(10, 1, "from"), (2, 0, "via"), (20, 1, "to")]
+                    .into_iter()
+                    .map(|(id, kind, role)| Member {
+                        id,
+                        kind,
+                        role: role.into(),
+                    })
+                    .collect(),
+            };
+            match case {
+                "missing" => rel.members[0].id = i64::MAX,
+                "unknown_role" => {
+                    rel.members = vec![Member {
+                        id: 40,
+                        kind: 1,
+                        role: "unexpected".into(),
+                    }]
+                }
+                "excluded" => rel.members[0].id = 30,
+                "excluded_only" => {
+                    rel.members[0].id = 30;
+                    rel.members[2].id = 30;
+                }
+                "unsupported" => {
+                    rel.tags.insert("restriction".into(), "unsupported".into());
+                }
+                "conditional" => {
+                    rel.tags.insert(
+                        "restriction:conditional".into(),
+                        "no_right_turn @ (Mo)".into(),
+                    );
+                }
+                "excepted" => {
+                    rel.tags.insert("except".into(), "motorcar".into());
+                }
+                "other_mode" => {
+                    rel.tags.remove("restriction");
+                    rel.tags
+                        .insert("restriction:bicycle".into(), "no_right_turn".into());
+                }
+                "nonrestriction" => {
+                    rel.tags.insert("type".into(), "multipolygon".into());
+                }
+                _ => {}
+            }
+            if case == "miskeyed" {
+                let way = osm.ways.remove(&10).unwrap();
+                osm.ways.insert(1000, way);
+            }
+            osm.relations.push(rel);
+            let rel = &osm.relations[0];
+            let mut full: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+            let mut sparse = restriction_way_index(&osm);
+            for (id, edge) in g.edges.iter().enumerate() {
+                full.entry(edge.way).or_default().push(id);
+                if let Some(ids) = sparse.get_mut(&edge.way) {
+                    ids.push(id);
+                }
+            }
+            sparse.retain(|_, ids| !ids.is_empty());
+            assert!(!sparse.contains_key(&i64::MAX));
+            if !restrictions::applies(rel) || restrictions::conditional(rel) {
+                assert!(sparse.is_empty(), "{case}");
+                continue;
+            }
+            let mapping: Vec<_> = osm.nodes.keys().copied().filter(|id| *id <= 4).collect();
+            let outgoing = Adjacency::new(g.nodes.len(), &g.edges).unwrap();
+            let expected = restrictions::resolve(rel, &osm, &mapping, &full, &g.edges, &outgoing);
+            let actual = if sparse.is_empty() {
+                Ok(None)
+            } else {
+                restrictions::resolve(rel, &osm, &mapping, &sparse, &g.edges, &outgoing)
+            };
+            assert_eq!(format!("{expected:?}"), format!("{actual:?}"), "{case}");
+            assert!(!sparse.contains_key(&40) || case == "unknown_role");
+            if case == "static" {
+                let (restricted, _) = graph(&osm).unwrap();
+                let from = g
+                    .edges
+                    .iter()
+                    .position(|e| e.way == 10 && e.to == 1)
+                    .unwrap();
+                let branch = g
+                    .edges
+                    .iter()
+                    .position(|e| e.way == 40 && e.from == 1)
+                    .unwrap();
+                assert!(restricted.forbidden.contains(&vec![from, branch]));
+            }
+            if case == "excluded_only" {
+                let (_, diagnostics) = graph(&osm).unwrap();
+                assert_eq!(diagnostics["non_driving_restrictions"], 1);
+            }
+        }
+    }
 }
