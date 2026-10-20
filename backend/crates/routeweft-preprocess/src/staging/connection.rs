@@ -5,6 +5,7 @@ pub use publication::{publish_block_ways, PublicationReport};
 mod edges;
 use super::{Record, Run, RunReader, StageOptions, StageReport, NEXT};
 use crate::{blocked_node, count, select_way, Result};
+pub(super) use blockways::prepare_with_policy;
 pub use blockways::{prepare_block_ways, BlockWaysOptions, BlockWaysReport};
 pub use edges::{
     emit_edges, index_adjacency, resolve_restrictions, AccessBudget, AdjacencyReport,

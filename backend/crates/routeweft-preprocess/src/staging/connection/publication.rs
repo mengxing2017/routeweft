@@ -1,4 +1,4 @@
-//! Convert completed, authenticated BlockWays artifacts to a final v2 dataset.
+//! Convert completed, authenticated external graph artifacts to a final v2 dataset.
 use super::BlockWaysReport;
 use crate::{InputReport, InvalidRestrictionPolicy, Result};
 use routeweft_dataset::{
@@ -56,7 +56,6 @@ impl Source {
             serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
         let defaults = routeweft_dataset::LoadOptions::default();
         if report.format_version != 1
-            || report.policy != InvalidRestrictionPolicy::BlockWays
             || !report.restrictions_resolved
             || report.nodes == 0
             || report.nodes > defaults.max_nodes as u64
@@ -64,6 +63,10 @@ impl Source {
             || report.restrictions > defaults.max_restriction_edges as u64 / 2
             || report.files.len() != FILES.len()
             || FILES.iter().any(|name| !report.files.contains_key(*name))
+            || (report.policy == InvalidRestrictionPolicy::Reject
+                && (!report.blocked_way_ids.is_empty()
+                    || !report.restriction_diagnostics.is_empty()
+                    || report.attempts != 1))
             || report.blocked_way_ids.len() > 32768
             || report.restriction_diagnostics.len() > 256
             || report.blocked_way_ids.windows(2).any(|w| w[0] >= w[1])

@@ -280,6 +280,15 @@ pub fn prepare_block_ways(
     output: &Path,
     options: BlockWaysOptions,
 ) -> Result<BlockWaysReport> {
+    prepare_with_policy(staged, output, options, InvalidRestrictionPolicy::BlockWays)
+}
+
+pub(crate) fn prepare_with_policy(
+    staged: &Path,
+    output: &Path,
+    options: BlockWaysOptions,
+    policy: InvalidRestrictionPolicy,
+) -> Result<BlockWaysReport> {
     if options.max_blocked_ways > 32_768 || options.max_member_references > 65_536 {
         return Err(invalid("BlockWays limits exceed intermediate caps").into());
     }
@@ -368,7 +377,7 @@ pub fn prepare_block_ways(
                     }
                     return Ok(BlockWaysReport {
                         format_version: 1,
-                        policy: InvalidRestrictionPolicy::BlockWays,
+                        policy,
                         source_records_sha256: source.run.digest.clone(),
                         source_sha256: source.report.source_sha256.clone(),
                         source_snapshot: source.report.source_snapshot,
@@ -392,7 +401,9 @@ pub fn prepare_block_ways(
                 }
                 Err(mut error) => {
                     owned.usage()?;
-                    if error.report.restriction_diagnostics.is_empty() {
+                    if policy == InvalidRestrictionPolicy::Reject
+                        || error.report.restriction_diagnostics.is_empty()
+                    {
                         return Err(error);
                     }
                     if audit.len() + error.report.restriction_diagnostics.len() > 256 {
@@ -423,7 +434,7 @@ pub fn prepare_block_ways(
             audit.append(&mut error.report.restriction_diagnostics);
             error.report.restriction_diagnostics = audit;
             error.report.blocked_way_ids = excluded.into_iter().collect();
-            error.report.policy = InvalidRestrictionPolicy::BlockWays;
+            error.report.policy = policy;
             error.report.source_sha256 = source.report.source_sha256;
             error.report.source_snapshot = source.report.source_snapshot;
             return Err(error);
@@ -464,7 +475,7 @@ pub fn prepare_block_ways(
         Ok(())
     })();
     if let Err(mut error) = publication {
-        error.report.policy = InvalidRestrictionPolicy::BlockWays;
+        error.report.policy = policy;
         error.report.source_sha256 = report.source_sha256.clone();
         error.report.source_snapshot = report.source_snapshot;
         error.report.nodes = report.nodes as usize;
