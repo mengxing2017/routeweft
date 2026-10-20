@@ -37,3 +37,5 @@ NodeEngine 保留节点级 P0 搜索，只有合成图用途，不提供持久�
 InputReport 是构建审计，不是可传给查询引擎的路由图。保存它与输入/工具身份；Engine::open 自动读取 format=1/2 数据集。策略含义和诊断分类见 [CLI](cli.md)。
 
 `build_with_options` 和 `routeweft_dataset::write` 默认生成 v1。显式选择二进制可调用 `build_with_format(input, output, options, routeweft_dataset::DatasetFormat::BinaryV2)`，已有 Graph 可调用 `routeweft_dataset::write_with_format`。两者保留原有审计与不可变发布规则；v2 不改变 Engine 的驻内存模型。格式契约见 [Dataset v2](dataset-format-v2.md)。
+
+显式磁盘构建可调用 `routeweft_preprocess::staging::build_external(input, output, scratch_parent, ExternalBuildOptions, ExternalBuildControl)`，返回 `ExternalBuildResult { manifest, report, resources }`，只生成 v2。全局磁盘预算使用 `options.stage.scratch_bytes/run_files`，另可配置字典、校验及限制工作集预算。`ExternalBuildControl` 接受可选的 `AtomicBool` 取消标记和 `Instant` 截止时间，只在阶段边界/最终提交前检查，不会中断当前阶段。scratch 和输出须在同一文件系统，输入与父目录在调用期间保持不变；具体预算和失败清理契约见 [磁盘构建](cli.md#显式磁盘构建)。原有 build API 继续使用内存路径；两种模式都不扩大现有输入/图上限或改变 Engine 的驻内存模型。

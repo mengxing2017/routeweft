@@ -32,6 +32,17 @@ backend/target/release/routeweft inspect --dataset ./datasets/city-driving-v1 --
 
 构建前先创建输出的父目录（例如 `mkdir -p datasets`），不要预先创建数据集目录本身。默认构建后目录包含 `manifest.json` 和 `graph.json`；显式指定 `--format 2` 则使用 `graph.bin`，需支持 v2 的工具读取。部署时完整复制该目录，再在目标机器执行 verify。两种格式均不扩大输入容量。
 
+需要使用磁盘流水线时，显式选择 v2 和 external；scratch 目录须与输出位于同一文件系统：
+
+```bash
+backend/target/release/routeweft build \
+  --input /absolute/path/to/city.osm.pbf --profile driving \
+  --builder external --format 2 --scratch-dir ./scratch \
+  --output ./datasets/city-driving-external --json > build-result.json
+```
+
+该模式仍默认 reject，保存的 JSON 包含完整策略审计和磁盘预算统计。默认总 scratch 为 1 GiB / 64 个文件，可通过 [CLI 参数](cli.md#显式磁盘构建) 配置；PBF、对象和图容量上限不随构建模式扩大。加载和查询仍驻内存。
+
 以下是 Monaco 范围内的示例坐标，仅在输入覆盖该区域且附近道路可通行时适用；使用其他城市时替换坐标。顺序为 **经度,纬度**：
 
 ```bash
@@ -66,7 +77,7 @@ python3 scripts/validate-city.py --binary backend/target/release/routeweft \
   --no-route '108.2532541,22.7745994;108.2534996,22.7738817' --no-route-radius-m 0.01
 ```
 
-脚本执行 version、preflight、重复 build、verify、成功 nearest/route、明确 NoRoute，以及自行生成的 ZIP/tar.gz 解包后重复检查。acceptance.json 保存每次命令的总耗时、可选 Linux VmHWM 采样、输入/工具身份、诊断与归档哈希。RSS 采样可能漏掉短峰值，不能当作精确峰值或资源隔离。生成的归档是独立复核用文件，不作为消费者的发布包或客户端安装包。
+脚本可加 `--builder external --format 2` 验证磁盘构建；preflight 仍是原 full 内存预检。脚本执行 version、preflight、重复 build、verify、成功 nearest/route、明确 NoRoute，以及自行生成的 ZIP/tar.gz 解包后重复检查。acceptance.json 保存每次命令的总耗时、可选 Linux VmHWM 采样、输入/工具身份、诊断与归档哈希。RSS 采样可能漏掉短峰值，不能当作精确峰值或资源隔离。生成的归档是独立复核用文件，不作为消费者的发布包或客户端安装包。
 
 ## 嵌入 Rust 应用
 
