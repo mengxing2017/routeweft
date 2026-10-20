@@ -2,6 +2,7 @@
 mod diagnostics;
 pub mod pbf;
 mod restrictions;
+pub mod staging;
 pub use diagnostics::{
     BuildOptions, Error, InputReport, InvalidRestrictionPolicy, MemberDiagnostic,
     RestrictionDiagnostic, Result,
