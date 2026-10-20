@@ -1,7 +1,7 @@
 //! Bounded PBF wire decoder written against the public OSM-binary schema.
 //! Supports raw/zlib blocks and ordinary/dense nodes; no copied protobuf code.
 use flate2::read::ZlibDecoder;
-use routeweft_dataset::{invalid, Error, Point, Result};
+use routeweft_dataset::{invalid, resource_limit, Error, Point, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
@@ -34,15 +34,32 @@ pub struct Osm {
     pub snapshot: Option<i64>,
     estimated_bytes: usize,
     relation_ids: BTreeSet<i64>,
+    scan_only: bool,
+    counts: [u64; 3],
+    decoded_bytes: u64,
 }
 impl Osm {
     fn charge(&mut self, bytes: usize) -> Result<()> {
+        let observed = self.counts.iter().sum::<u64>() + 1;
+        if observed > OBJECTS as u64 {
+            return Err(resource_limit(
+                "osm_objects",
+                OBJECTS as u64,
+                observed,
+                "pbf_decode",
+            ));
+        }
         self.estimated_bytes = self
             .estimated_bytes
             .checked_add(bytes)
             .ok_or(Error::LimitExceeded)?;
         if self.estimated_bytes > 512 * 1024 * 1024 {
-            return Err(Error::LimitExceeded);
+            return Err(resource_limit(
+                "estimated_osm_bytes",
+                512 * 1024 * 1024,
+                self.estimated_bytes as u64,
+                "pbf_decode",
+            ));
         }
         Ok(())
     }
@@ -77,7 +94,12 @@ fn fields(bytes: &[u8]) -> Result<Vec<(u64, Value<'_>)>> {
     let mut p = 0;
     while p < bytes.len() {
         if out.len() >= 1_000_000 {
-            return Err(Error::LimitExceeded);
+            return Err(resource_limit(
+                "protobuf_fields",
+                1_000_000,
+                out.len() as u64 + 1,
+                "pbf_decode",
+            ));
         }
         let tag = var(bytes, &mut p)?;
         if tag >> 3 == 0 {
@@ -132,7 +154,12 @@ fn packed(f: &[(u64, Value<'_>)], id: u64) -> Result<Vec<u64>> {
                 while p < bytes.len() {
                     out.push(var(bytes, &mut p)?);
                     if out.len() > OBJECTS {
-                        return Err(Error::LimitExceeded);
+                        return Err(resource_limit(
+                            "packed_values",
+                            OBJECTS as u64,
+                            out.len() as u64,
+                            "pbf_decode",
+                        ));
                     }
                 }
             }
@@ -157,7 +184,12 @@ fn delta(values: Vec<u64>) -> Result<Vec<i64>> {
 }
 fn text(bytes: &[u8]) -> Result<String> {
     if bytes.len() > 65536 {
-        return Err(Error::LimitExceeded);
+        return Err(resource_limit(
+            "string_bytes",
+            65536,
+            bytes.len() as u64,
+            "pbf_decode",
+        ));
     }
     String::from_utf8(bytes.to_vec()).map_err(|_| invalid("utf8"))
 }
@@ -194,8 +226,9 @@ fn point(lon: i64, lat: i64, g: i64, lo: i64, la: i64) -> Result<Point> {
 }
 fn insert_node(osm: &mut Osm, node: Node) -> Result<()> {
     osm.charge(128 + tag_bytes(&node.tags))?;
-    if osm.nodes.len() + osm.ways.len() + osm.relations.len() >= OBJECTS {
-        return Err(Error::LimitExceeded);
+    osm.counts[0] += 1;
+    if osm.scan_only {
+        return Ok(());
     }
     if osm.nodes.insert(node.id, node).is_some() {
         return Err(invalid("duplicate node"));
@@ -264,7 +297,12 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                                 pos += 1;
                                 tags.insert(string(&table, k)?, string(&table, val)?);
                                 if tags.len() > 4096 {
-                                    return Err(Error::LimitExceeded);
+                                    return Err(resource_limit(
+                                        "node_tags",
+                                        4096,
+                                        tags.len() as u64,
+                                        "pbf_decode",
+                                    ));
                                 }
                             }
                         }
@@ -288,13 +326,14 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                         tags: tags(&v, &table)?,
                     };
                     osm.charge(128 + way.refs.len() * 8 + tag_bytes(&way.tags))?;
-                    if osm.ways.insert(way.id, way).is_some() {
+                    osm.counts[1] += 1;
+                    if !osm.scan_only && osm.ways.insert(way.id, way).is_some() {
                         return Err(invalid("duplicate way"));
                     }
                 }
                 4 => {
                     let relation_id = int(&v, 1, None)? as i64;
-                    if !osm.relation_ids.insert(relation_id) {
+                    if !osm.scan_only && !osm.relation_ids.insert(relation_id) {
                         return Err(invalid(format!("duplicate relation {relation_id}")));
                     }
                     let ids = delta(packed(&v, 9)?)?;
@@ -328,27 +367,82 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                         128 + tag_bytes(&tags)
                             + members.iter().map(|m| 64 + m.role.len()).sum::<usize>(),
                     )?;
-                    osm.relations.push(Relation {
-                        id: relation_id,
-                        members,
-                        tags,
-                    });
+                    osm.counts[2] += 1;
+                    if !osm.scan_only {
+                        osm.relations.push(Relation {
+                            id: relation_id,
+                            members,
+                            tags,
+                        });
+                    }
                 }
                 _ => {}
-            }
-            if osm.nodes.len() + osm.ways.len() + osm.relations.len() > OBJECTS {
-                return Err(Error::LimitExceeded);
             }
         }
     }
     Ok(())
 }
+/// Same bounded wire decoder, without retaining the global object collections.
+/// This does not resolve references, detect duplicate IDs, or validate driving rules.
+#[derive(Debug, serde::Serialize)]
+pub struct StructureReport {
+    pub validation_scope: &'static str,
+    pub semantic_validation: bool,
+    pub duplicate_ids_checked: bool,
+    pub source_sha256: String,
+    pub source_snapshot: Option<i64>,
+    pub nodes: u64,
+    pub ways: u64,
+    pub relations: u64,
+    pub decoded_bytes: u64,
+    /// Estimate of what the full decoder would retain, not this scanner's RSS.
+    pub estimated_full_decode_bytes: usize,
+}
+pub fn scan(path: &Path) -> Result<StructureReport> {
+    let input_bytes = std::fs::metadata(path)?.len();
+    if input_bytes > 512 * 1024 * 1024 {
+        return Err(resource_limit(
+            "input_bytes",
+            512 * 1024 * 1024,
+            input_bytes,
+            "pbf_read",
+        ));
+    }
+    let source_sha256 = routeweft_dataset::hash_file(path)?;
+    let osm = read_mode(path, true)?;
+    if routeweft_dataset::hash_file(path)? != source_sha256 {
+        return Err(invalid("input changed while scanning"));
+    }
+    Ok(StructureReport {
+        validation_scope: "structure_only",
+        semantic_validation: false,
+        duplicate_ids_checked: false,
+        source_sha256,
+        source_snapshot: osm.snapshot,
+        nodes: osm.counts[0],
+        ways: osm.counts[1],
+        relations: osm.counts[2],
+        decoded_bytes: osm.decoded_bytes,
+        estimated_full_decode_bytes: osm.estimated_bytes,
+    })
+}
 pub fn read(path: &Path) -> Result<Osm> {
+    read_mode(path, false)
+}
+fn read_mode(path: &Path, scan_only: bool) -> Result<Osm> {
     let mut input = std::fs::File::open(path)?;
     if input.metadata()?.len() > 512 * 1024 * 1024 {
-        return Err(Error::LimitExceeded);
+        return Err(resource_limit(
+            "input_bytes",
+            512 * 1024 * 1024,
+            input.metadata()?.len(),
+            "pbf_read",
+        ));
     }
-    let mut osm = Osm::default();
+    let mut osm = Osm {
+        scan_only,
+        ..Default::default()
+    };
     let mut header = false;
     let mut decoded = 0_usize;
     loop {
@@ -368,7 +462,7 @@ pub fn read(path: &Path) -> Result<Osm> {
         let kind = text(blob(&f, 1)?)?;
         let size = int(&f, 3, None)?;
         if size == 0 || size > BLOCK as u64 {
-            return Err(Error::LimitExceeded);
+            return Err(resource_limit("blob_bytes", BLOCK as u64, size, "pbf_read"));
         }
         let mut bytes = vec![0; size as usize];
         input.read_exact(&mut bytes)?;
@@ -385,7 +479,12 @@ pub fn read(path: &Path) -> Result<Osm> {
         } else {
             let expected = int(&f, 2, None)?;
             if expected > BLOCK as u64 {
-                return Err(Error::LimitExceeded);
+                return Err(resource_limit(
+                    "raw_block_bytes",
+                    BLOCK as u64,
+                    expected,
+                    "pbf_decode",
+                ));
             }
             let mut raw = Vec::new();
             ZlibDecoder::new(blob(&f, 3)?)
@@ -398,7 +497,12 @@ pub fn read(path: &Path) -> Result<Osm> {
         };
         decoded = decoded.checked_add(raw.len()).ok_or(Error::LimitExceeded)?;
         if decoded > 512 * 1024 * 1024 {
-            return Err(Error::LimitExceeded);
+            return Err(resource_limit(
+                "decoded_bytes",
+                512 * 1024 * 1024,
+                decoded as u64,
+                "pbf_decode",
+            ));
         }
         match kind.as_str() {
             "OSMHeader" => {
@@ -435,15 +539,54 @@ pub fn read(path: &Path) -> Result<Osm> {
             _ => return Err(invalid("unsupported block")),
         }
     }
-    if !header || osm.nodes.is_empty() {
+    if !header || osm.counts[0] == 0 {
         return Err(invalid("empty PBF"));
     }
+    osm.decoded_bytes = decoded as u64;
     Ok(osm)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structural_scan_discards_objects_and_rejects_full_decode_capacity() {
+        let mut scan = Osm {
+            scan_only: true,
+            ..Default::default()
+        };
+        for id in 0..1000 {
+            insert_node(
+                &mut scan,
+                Node {
+                    id,
+                    point: Point { lon: 0., lat: 0. },
+                    tags: Tags::new(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(scan.counts, [1000, 0, 0]);
+        assert!(scan.nodes.is_empty());
+        assert!(scan.ways.is_empty());
+        assert!(scan.relations.is_empty());
+        scan.counts[0] = OBJECTS as u64;
+        let error = insert_node(
+            &mut scan,
+            Node {
+                id: 1001,
+                point: Point { lon: 0., lat: 0. },
+                tags: Tags::new(),
+            },
+        )
+        .unwrap_err();
+        let Error::ResourceLimit(resource) = error else {
+            panic!("missing resource diagnostic")
+        };
+        assert_eq!(resource.resource, "osm_objects");
+        assert_eq!(resource.observed, OBJECTS as u64 + 1);
+        assert_eq!(resource.stage, "pbf_decode");
+    }
     #[test]
     fn rejects_overflows_and_truncation_without_panicking() {
         for bytes in [
