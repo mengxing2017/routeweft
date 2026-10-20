@@ -27,6 +27,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 /// Hard limits for serialized records and live temporary run bytes.
 #[derive(Clone, Copy)]
 pub struct StageOptions {
+    pub graph_capacity: routeweft_dataset::GraphCapacity,
     pub batch_bytes: u64,
     pub batch_records: usize,
     pub record_bytes: u64,
@@ -36,6 +37,7 @@ pub struct StageOptions {
 impl Default for StageOptions {
     fn default() -> Self {
         Self {
+            graph_capacity: Default::default(),
             batch_bytes: 8 * 1024 * 1024,
             batch_records: 32_768,
             record_bytes: 4 * 1024 * 1024,
@@ -365,7 +367,8 @@ impl Iterator for RunReader {
 }
 /// Decode and globally sort projected OSM records in a new output directory.
 /// On failure, only this invocation's private temporary directory is removed.
-/// Existing decoder capacity limits still apply. A successful stage validates
+/// Streaming work limits apply; batches, records and scratch have independent
+/// budgets. The input remains capped at 512 MiB. A successful stage validates
 /// duplicate IDs, but does not validate references, restrictions or routability.
 pub fn stage(input: &Path, output: &Path, options: StageOptions) -> Result<StageReport> {
     if options.batch_bytes < 14

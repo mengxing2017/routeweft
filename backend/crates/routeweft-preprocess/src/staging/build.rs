@@ -163,6 +163,7 @@ pub fn build_external(
 ) -> Result<ExternalBuildResult> {
     run(input, output, scratch_parent, options, |_| control.check()).map_err(|mut error| {
         error.report.policy = options.build.invalid_restrictions;
+        error.report.maxspeed_policy = options.build.invalid_maxspeed;
         if error.report.failure_code.is_none() {
             error.report.failure_code = Some("ExternalBuildError".into());
         }
@@ -231,6 +232,7 @@ fn run(
     };
     let mut context = InputReport {
         policy: options.build.invalid_restrictions,
+        maxspeed_policy: options.build.invalid_maxspeed,
         ..Default::default()
     };
     let result = (|| {
@@ -270,6 +272,7 @@ fn run(
             &staged,
             &prepared,
             BlockWaysOptions {
+                invalid_maxspeed: options.build.invalid_maxspeed,
                 restriction: RestrictionOptions {
                     stage: StageOptions {
                         scratch_bytes: remaining_bytes,
@@ -287,6 +290,8 @@ fn run(
             valid: false,
             failure_code: None,
             policy: graph.policy,
+            maxspeed_policy: graph.maxspeed_policy,
+            maxspeed_diagnostics: graph.maxspeed_diagnostics,
             source_sha256: graph.source_sha256,
             source_snapshot: graph.source_snapshot,
             nodes: graph.nodes as usize,
@@ -318,6 +323,7 @@ fn run(
             &prepared,
             &final_dataset,
             BinaryWriteOptions {
+                graph_capacity: options.stage.graph_capacity,
                 output_bytes: options.writer.output_bytes.min(remaining_bytes),
                 ..options.writer
             },
@@ -357,6 +363,7 @@ fn run(
     result.map_err(|mut error: Error| {
         error.report.valid = false;
         error.report.policy = options.build.invalid_restrictions;
+        error.report.maxspeed_policy = options.build.invalid_maxspeed;
         if error.report.failure_code.is_none() {
             error.report.failure_code = Some("ExternalBuildError".into());
         }
@@ -368,6 +375,9 @@ fn run(
             error.report.nodes = context.nodes;
             error.report.edges = context.edges;
             error.report.restrictions = context.restrictions;
+        }
+        if error.report.maxspeed_diagnostics.is_empty() {
+            error.report.maxspeed_diagnostics = context.maxspeed_diagnostics;
         }
         if error.report.diagnostics.is_empty() {
             error.report.diagnostics = context.diagnostics;
@@ -424,6 +434,7 @@ mod tests {
             let options = ExternalBuildOptions {
                 build: BuildOptions {
                     invalid_restrictions: policy,
+                    ..Default::default()
                 },
                 ..Default::default()
             };
@@ -500,6 +511,7 @@ mod tests {
             let options = ExternalBuildOptions {
                 build: BuildOptions {
                     invalid_restrictions: policy,
+                    ..Default::default()
                 },
                 ..Default::default()
             };

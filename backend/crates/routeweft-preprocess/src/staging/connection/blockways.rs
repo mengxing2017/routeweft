@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 /// Total owned scratch/file allowance uses restriction.stage, including retained phases.
 #[derive(Clone, Copy)]
 pub struct BlockWaysOptions {
+    pub invalid_maxspeed: crate::InvalidMaxspeedPolicy,
     pub restriction: RestrictionOptions,
     pub max_blocked_ways: usize,
     /// Aggregate kind=way member references retained for a failed round.
@@ -24,6 +25,7 @@ pub struct BlockWaysOptions {
 impl Default for BlockWaysOptions {
     fn default() -> Self {
         Self {
+            invalid_maxspeed: Default::default(),
             restriction: RestrictionOptions::default(),
             max_blocked_ways: 32_768,
             max_member_references: 65_536,
@@ -33,6 +35,12 @@ impl Default for BlockWaysOptions {
 /// Completed intermediate graph and restriction audit; semantic_validation remains false.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockWaysReport {
+    #[serde(default)]
+    pub graph_capacity: routeweft_dataset::GraphCapacity,
+    #[serde(default)]
+    pub maxspeed_policy: crate::InvalidMaxspeedPolicy,
+    #[serde(default)]
+    pub maxspeed_diagnostics: Vec<crate::MaxspeedDiagnostic>,
     pub format_version: u32,
     pub policy: InvalidRestrictionPolicy,
     pub source_records_sha256: String,
@@ -317,6 +325,7 @@ pub(crate) fn prepare_with_policy(
     let mut excluded = BTreeSet::new();
     let mut audit = Vec::new();
     let mut attempts = 0;
+    let mut speed_audit = Vec::new();
     let result = (|| {
         loop {
             attempts += 1;
@@ -331,7 +340,15 @@ pub(crate) fn prepare_with_policy(
             let adjacency = graph.join("adjacency");
             let restrictions = graph.join("restrictions");
             let (stage_options, retained) = owned.remaining()?;
-            let connection = connect_excluding(staged, &joined, stage_options, &excluded)?;
+            speed_audit.clear();
+            let connection = connect_excluding(
+                staged,
+                &joined,
+                stage_options,
+                &excluded,
+                options.invalid_maxspeed,
+            )?;
+            speed_audit = connection.maxspeed_diagnostics.clone();
             owned.completed(retained, connection.peak_scratch_bytes)?;
             let (stage_options, retained) = owned.remaining()?;
             let edge = emit_edges(staged, &joined, &edges, stage_options)?;
@@ -376,6 +393,9 @@ pub(crate) fn prepare_with_policy(
                             .insert(name.clone(), (size, hash_file(&owned.path.join(name))?));
                     }
                     return Ok(BlockWaysReport {
+                        graph_capacity: options.restriction.stage.graph_capacity,
+                        maxspeed_policy: options.invalid_maxspeed,
+                        maxspeed_diagnostics: speed_audit.clone(),
                         format_version: 1,
                         policy,
                         source_records_sha256: source.run.digest.clone(),
@@ -435,6 +455,10 @@ pub(crate) fn prepare_with_policy(
             error.report.restriction_diagnostics = audit;
             error.report.blocked_way_ids = excluded.into_iter().collect();
             error.report.policy = policy;
+            error.report.maxspeed_policy = options.invalid_maxspeed;
+            if error.report.maxspeed_diagnostics.is_empty() {
+                error.report.maxspeed_diagnostics = speed_audit;
+            }
             error.report.source_sha256 = source.report.source_sha256;
             error.report.source_snapshot = source.report.source_snapshot;
             return Err(error);
@@ -475,6 +499,8 @@ pub(crate) fn prepare_with_policy(
         Ok(())
     })();
     if let Err(mut error) = publication {
+        error.report.maxspeed_policy = report.maxspeed_policy;
+        error.report.maxspeed_diagnostics = report.maxspeed_diagnostics.clone();
         error.report.policy = policy;
         error.report.source_sha256 = report.source_sha256.clone();
         error.report.source_snapshot = report.source_snapshot;
@@ -609,6 +635,7 @@ mod tests {
             osm,
             crate::BuildOptions {
                 invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -654,6 +681,7 @@ mod tests {
             &osm,
             crate::BuildOptions {
                 invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -761,6 +789,7 @@ mod tests {
             &osm,
             crate::BuildOptions {
                 invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -793,6 +822,7 @@ mod tests {
             &osm,
             crate::BuildOptions {
                 invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -822,6 +852,7 @@ mod tests {
             &osm,
             crate::BuildOptions {
                 invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+                ..Default::default()
             },
         )
         .unwrap_err();

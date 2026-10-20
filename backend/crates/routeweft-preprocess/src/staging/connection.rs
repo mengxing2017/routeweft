@@ -33,6 +33,12 @@ fn id(key: u64) -> i64 {
 /// A joined intermediate, not a routing dataset or restriction validation result.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectionReport {
+    #[serde(default)]
+    pub graph_capacity: routeweft_dataset::GraphCapacity,
+    #[serde(default)]
+    pub maxspeed_policy: crate::InvalidMaxspeedPolicy,
+    #[serde(default)]
+    pub maxspeed_diagnostics: Vec<crate::MaxspeedDiagnostic>,
     pub format_version: u32,
     pub source_records_sha256: String,
     pub source_sha256: String,
@@ -328,8 +334,8 @@ impl Source {
             .ok_or_else(|| invalid("stage counts overflow"))?;
         if report.format_version != 1
             || !report.duplicate_ids_checked
-            || count > 2_000_000
-            || report.records_bytes > 1024 * 1024 * 1024
+            || count > crate::pbf::STREAM_OBJECTS
+            || report.records_bytes > crate::pbf::STREAM_OBJECT_BYTES
         {
             return Err(invalid("unsupported join source manifest").into());
         }
@@ -380,13 +386,37 @@ impl Source {
 /// The source is a completed `stage` directory. No full OSM/ID collection is
 /// loaded. This entry point applies no explicit exclusions; BlockWays uses a retry coordinator.
 pub fn connect(source: &Path, output: &Path, options: StageOptions) -> Result<ConnectionReport> {
-    connect_excluding(source, output, options, &BTreeSet::new())
+    connect_excluding(
+        source,
+        output,
+        options,
+        &BTreeSet::new(),
+        Default::default(),
+    )
 }
 fn connect_excluding(
     source: &Path,
     output: &Path,
     options: StageOptions,
     excluded: &BTreeSet<i64>,
+    policy: crate::InvalidMaxspeedPolicy,
+) -> Result<ConnectionReport> {
+    let mut audit = Vec::new();
+    connect_with_audit(source, output, options, excluded, policy, &mut audit).map_err(
+        |mut error| {
+            error.report.maxspeed_policy = policy;
+            error.report.maxspeed_diagnostics = audit;
+            error
+        },
+    )
+}
+fn connect_with_audit(
+    source: &Path,
+    output: &Path,
+    options: StageOptions,
+    excluded: &BTreeSet<i64>,
+    policy: crate::InvalidMaxspeedPolicy,
+    audit: &mut Vec<crate::MaxspeedDiagnostic>,
 ) -> Result<ConnectionReport> {
     if options.batch_bytes < WIDTH
         || options.batch_records == 0
@@ -461,6 +491,8 @@ fn connect_excluding(
                 &way,
                 contains(&conditional, &mut conditional_file, key(way.id))?,
                 &mut stats,
+                policy,
+                audit,
             ) {
                 Ok(selection) => selection,
                 Err(error) => {
@@ -550,19 +582,41 @@ fn connect_excluding(
     if let Some(error) = profile_error {
         return Err(error);
     }
-    if nodes.count > 1_000_000 {
-        return Err(resource_limit("graph_nodes", 1_000_000, 1_000_001, "graph_build").into());
-    }
-    if extent.is_some_and(|(a, b, c, d)| b - a > 5. || d - c > 5.) {
-        return Err(invalid(
-            "unsupported geographic extent: city graph must span at most 5 degrees per axis",
+    let limits = options.graph_capacity.limits();
+    if nodes.count > limits.max_nodes as u64 {
+        return Err(resource_limit(
+            "graph_nodes",
+            limits.max_nodes as u64,
+            nodes.count,
+            "graph_build",
         )
+        .into());
+    }
+    if extent.is_some_and(|(a, b, c, d)| {
+        b - a > options.graph_capacity.max_span_degrees()
+            || d - c > options.graph_capacity.max_span_degrees()
+    }) {
+        return Err(invalid(format!(
+            "unsupported geographic extent: {} graph must span at most {} degrees per axis",
+            if options.graph_capacity == routeweft_dataset::GraphCapacity::City {
+                "city"
+            } else {
+                "regional"
+            },
+            options.graph_capacity.max_span_degrees()
+        ))
         .into());
     }
     let nodes = nodes.finish()?;
     work.remove(refs)?;
     let references = joined.finish(&mut work)?;
+    if options.graph_capacity == routeweft_dataset::GraphCapacity::Regional {
+        stats.insert("graph_capacity_regional".into(), 1);
+    }
     let mut report = ConnectionReport {
+        graph_capacity: options.graph_capacity,
+        maxspeed_policy: policy,
+        maxspeed_diagnostics: audit.clone(),
         format_version: 1,
         source_records_sha256: source.run.digest,
         source_sha256: source.report.source_sha256,
@@ -782,8 +836,14 @@ mod tests {
         let mut selected = Vec::new();
         let mut references = Vec::new();
         for way in osm.ways.values() {
-            if let Some(selection) =
-                select_way(way, conditional.contains(&way.id), &mut stats).unwrap()
+            if let Some(selection) = select_way(
+                way,
+                conditional.contains(&way.id),
+                &mut stats,
+                Default::default(),
+                &mut Vec::new(),
+            )
+            .unwrap()
             {
                 selected.push([
                     key(way.id),
@@ -878,7 +938,9 @@ mod tests {
         let parent = temporary();
         let osm = fixture();
         let input = source(&parent, &osm);
-        let (graph, stats) = crate::graph_attempt(&osm, &BTreeSet::new()).unwrap();
+        let (graph, stats) =
+            crate::graph_attempt(&osm, &BTreeSet::new(), Default::default(), &mut Vec::new())
+                .unwrap();
         let out = parent.join("joined");
         let report = connect(
             &input,
@@ -946,10 +1008,11 @@ mod tests {
                     ]),
                 },
             );
-            let expected = crate::graph_attempt(&osm, &BTreeSet::new())
-                .err()
-                .unwrap()
-                .to_string();
+            let expected =
+                crate::graph_attempt(&osm, &BTreeSet::new(), Default::default(), &mut Vec::new())
+                    .err()
+                    .unwrap()
+                    .to_string();
             let input = source(&parent, &osm);
             let result = connect(
                 &input,
@@ -994,7 +1057,8 @@ mod tests {
                 .insert(tag.into(), value.into());
             let input = source(&parent, &osm);
             let result = connect(&input, &parent.join("out"), StageOptions::default());
-            match crate::graph_attempt(&osm, &BTreeSet::new()) {
+            match crate::graph_attempt(&osm, &BTreeSet::new(), Default::default(), &mut Vec::new())
+            {
                 Ok((graph, stats)) => {
                     let report = result.unwrap();
                     assert_eq!(report.nodes as usize, graph.nodes.len());
@@ -1009,10 +1073,11 @@ mod tests {
         let parent = temporary();
         let mut osm = fixture();
         osm.nodes.get_mut(&9).unwrap().point.lon = 118.;
-        let expected = crate::graph_attempt(&osm, &BTreeSet::new())
-            .err()
-            .unwrap()
-            .to_string();
+        let expected =
+            crate::graph_attempt(&osm, &BTreeSet::new(), Default::default(), &mut Vec::new())
+                .err()
+                .unwrap()
+                .to_string();
         let input = source(&parent, &osm);
         assert_eq!(
             connect(&input, &parent.join("out"), StageOptions::default())
@@ -1020,6 +1085,24 @@ mod tests {
                 .to_string(),
             expected
         );
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn streaming_manifest_capacity_does_not_bypass_record_validation() {
+        let parent = temporary();
+        let input = source(&parent, &fixture());
+        let manifest_path = input.join("manifest.json");
+        let mut manifest: StageReport =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.counts = [2_000_001, 0, 0];
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let source = Source::open(&input, StageOptions::default().record_bytes).unwrap();
+        // A larger declared workload is supported, but a forged count must not
+        // let truncated/mismatched records pass the authenticated reader.
+        assert!(source.visit(|_| Ok(())).is_err());
+        manifest.counts = [crate::pbf::STREAM_OBJECTS + 1, 0, 0];
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(Source::open(&input, StageOptions::default().record_bytes).is_err());
         fs::remove_dir_all(parent).unwrap();
     }
     #[test]

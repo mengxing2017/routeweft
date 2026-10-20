@@ -21,6 +21,8 @@ use std::sync::atomic::Ordering;
 /// Intermediate direction edges. Restrictions have not been resolved.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EdgeReport {
+    #[serde(default)]
+    pub graph_capacity: routeweft_dataset::GraphCapacity,
     pub format_version: u32,
     pub source_records_sha256: String,
     pub connection_manifest_sha256: String,
@@ -122,10 +124,9 @@ impl EdgeWriter {
         })
     }
     fn push(&mut self, edge: Edge, work: &mut Workspace) -> Result<()> {
-        if self.count >= 2_000_000 {
-            return Err(
-                resource_limit("graph_edges", 2_000_000, self.count + 1, "graph_build").into(),
-            );
+        let limit = work.options.graph_capacity.limits().max_edges as u64;
+        if self.count >= limit {
+            return Err(resource_limit("graph_edges", limit, self.count + 1, "graph_build").into());
         }
         if edge.name.len() > 4096 || edge.class.len() > 64 {
             return Err(invalid("edge").into());
@@ -185,7 +186,8 @@ pub fn emit_edges(
     if connection.format_version != 1
         || connection.profile != "driving-v1"
         || !connection.reference_closure_validated
-        || connection.nodes > 1_000_000
+        || connection.graph_capacity != options.graph_capacity
+        || connection.nodes > options.graph_capacity.limits().max_nodes as u64
         || connection.blocked_way_ids.len() > 32_768
         || connection.blocked_way_ids.windows(2).any(|w| w[0] >= w[1])
         || connection.selected_ways > source.report.counts[1]
@@ -209,6 +211,7 @@ pub fn emit_edges(
         "ways.run",
         connection.selected_ways,
     )?;
+    let mut speed_audit = Vec::new();
     let mut node_rows = Cursor::open(&node_run)?;
     let mut node = node_rows.next()?;
     let mut refs = Cursor::open(&refs_run)?;
@@ -294,8 +297,14 @@ pub fn emit_edges(
                         return Err(invalid("selected way order").into());
                     }
                     previous_way = Some(row[0]);
-                    let expected = select_way(&way, false, &mut BTreeMap::new())?
-                        .ok_or_else(|| invalid("selected way excluded by profile"))?;
+                    let expected = select_way(
+                        &way,
+                        false,
+                        &mut BTreeMap::new(),
+                        connection.maxspeed_policy,
+                        &mut speed_audit,
+                    )?
+                    .ok_or_else(|| invalid("selected way excluded by profile"))?;
                     if row
                         != [
                             key(way.id),
@@ -397,6 +406,9 @@ pub fn emit_edges(
     {
         return Err(invalid("unconsumed edge input rows").into());
     }
+    if speed_audit != connection.maxspeed_diagnostics {
+        return Err(invalid("connection maxspeed audit differs from source").into());
+    }
     if connection.nodes == 0 || edges.count == 0 {
         return Err(invalid("no driving roads").into());
     }
@@ -415,6 +427,7 @@ pub fn emit_edges(
     let edge_file = edges.finish()?;
     let index = index.finish()?;
     let report = EdgeReport {
+        graph_capacity: options.graph_capacity,
         format_version: 1,
         source_records_sha256: source.run.digest,
         connection_manifest_sha256: connection_digest,
@@ -468,7 +481,7 @@ impl WayEdgeIndex {
         let report: EdgeReport = manifest(directory)?;
         if report.format_version != 1
             || report.profile != "driving-v1"
-            || report.edges > 2_000_000
+            || report.edges > report.graph_capacity.limits().max_edges as u64
             || report.indexed_ways > report.edges
             || report.edges == 0
         {
@@ -702,12 +715,64 @@ mod tests {
         assert_eq!(index.edge_range(i64::MAX).unwrap(), None);
     }
     #[test]
+    fn speed_fallback_and_audit_are_revalidated_against_the_staged_source() {
+        let parent = temporary();
+        let mut osm = expanded_fixture();
+        osm.ways
+            .get_mut(&-50)
+            .unwrap()
+            .tags
+            .insert("maxspeed".into(), "辅路".into());
+        let staged = source(&parent, &osm);
+        let joined = parent.join("join");
+        let mut connection = crate::staging::connection::connect_excluding(
+            &staged,
+            &joined,
+            Default::default(),
+            &BTreeSet::new(),
+            crate::InvalidMaxspeedPolicy::UseDefault,
+        )
+        .unwrap();
+        let output = parent.join("edges");
+        let report = emit_edges(&staged, &joined, &output, Default::default()).unwrap();
+        let (graph, _) = crate::graph_attempt(
+            &osm,
+            &BTreeSet::new(),
+            crate::InvalidMaxspeedPolicy::UseDefault,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_graph(&graph, &output, &report);
+        connection.maxspeed_diagnostics[0].effective_kmh = Some(99.);
+        fs::write(
+            joined.join("manifest.json"),
+            serde_json::to_vec(&connection).unwrap(),
+        )
+        .unwrap();
+        let rejected = parent.join("rejected");
+        let error = emit_edges(&staged, &joined, &rejected, Default::default()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("maxspeed audit differs from source"));
+        assert!(!rejected.exists());
+        connection.maxspeed_policy = crate::InvalidMaxspeedPolicy::Reject;
+        fs::write(
+            joined.join("manifest.json"),
+            serde_json::to_vec(&connection).unwrap(),
+        )
+        .unwrap();
+        assert!(emit_edges(&staged, &joined, &rejected, Default::default()).is_err());
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
     fn streamed_edges_and_ranges_match_graph_order_and_costs() {
         let parent = temporary();
         let osm = expanded_fixture();
         let (staged, joined) = inputs(&parent, &osm);
         let output = parent.join("edges");
-        let (graph, stats) = crate::graph_attempt(&osm, &BTreeSet::new()).unwrap();
+        let (graph, stats) =
+            crate::graph_attempt(&osm, &BTreeSet::new(), Default::default(), &mut Vec::new())
+                .unwrap();
         let report = emit_edges(&staged, &joined, &output, StageOptions::default()).unwrap();
         assert_graph(&graph, &output, &report);
         for (key, value) in &report.diagnostics {
@@ -739,10 +804,11 @@ mod tests {
             } else {
                 osm.ways.get_mut(&-8).unwrap().refs = vec![2, 2];
             }
-            let expected = crate::graph_attempt(&osm, &BTreeSet::new())
-                .err()
-                .unwrap()
-                .to_string();
+            let expected =
+                crate::graph_attempt(&osm, &BTreeSet::new(), Default::default(), &mut Vec::new())
+                    .err()
+                    .unwrap()
+                    .to_string();
             let (staged, joined) = inputs(&parent, &osm);
             assert_eq!(
                 emit_edges(
@@ -925,7 +991,9 @@ mod tests {
         // Keep conditional restrictions (selection), defer all static relations
         // just as emit_edges does; no BlockWays retry has happened at this stage.
         osm.relations.retain(crate::restrictions::conditional);
-        let (graph, _) = crate::graph_attempt(&osm, &BTreeSet::new()).unwrap();
+        let (graph, _) =
+            crate::graph_attempt(&osm, &BTreeSet::new(), Default::default(), &mut Vec::new())
+                .unwrap();
         assert_graph(&graph, &output, &report);
         println!("{}", serde_json::to_string(&report).unwrap());
         fs::remove_dir_all(parent).unwrap();

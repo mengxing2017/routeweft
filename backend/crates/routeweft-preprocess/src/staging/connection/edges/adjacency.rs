@@ -102,9 +102,9 @@ fn source(directory: &Path) -> Result<(EdgeReport, String, u64)> {
     if report.format_version != 1
         || report.profile != "driving-v1"
         || report.nodes == 0
-        || report.nodes > 1_000_000
+        || report.nodes > report.graph_capacity.limits().max_nodes as u64
         || report.edges == 0
-        || report.edges > 2_000_000
+        || report.edges > report.graph_capacity.limits().max_edges as u64
         || report.indexed_ways > report.edges
         || report.files.len() != 2
         || report.restrictions_resolved
@@ -143,6 +143,9 @@ pub fn index_adjacency(
         return Err(invalid("adjacency output exists").into());
     }
     let (report, digest, edge_bytes) = source(input)?;
+    if report.graph_capacity != options.graph_capacity {
+        return Err(invalid("adjacency capacity mismatch").into());
+    }
     let way_run = descriptor(input, &report.files, "way-edges.run", report.indexed_ways)?;
     let mut ways = Cursor::open(&way_run)?;
     let mut way = ways.next()?;

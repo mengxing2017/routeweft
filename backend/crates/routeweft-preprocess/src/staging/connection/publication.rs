@@ -54,7 +54,7 @@ impl Source {
         }
         let report: BlockWaysReport =
             serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
-        let defaults = routeweft_dataset::LoadOptions::default();
+        let defaults = report.graph_capacity.limits();
         if report.format_version != 1
             || !report.restrictions_resolved
             || report.nodes == 0
@@ -154,6 +154,10 @@ impl Source {
             ]
             .iter()
             .any(|v| v != &m.source_records_sha256)
+            || connection.graph_capacity != m.graph_capacity
+            || edges.graph_capacity != m.graph_capacity
+            || connection.maxspeed_policy != m.maxspeed_policy
+            || connection.maxspeed_diagnostics != m.maxspeed_diagnostics
             || connection.blocked_way_ids != m.blocked_way_ids
             || diagnostics != m.diagnostics
             || m.restriction_diagnostics
@@ -218,7 +222,11 @@ impl BinarySource for Source {
             let path = self.directory.join(name);
             let file = regular(&path)?;
             let (bytes, digest) = &self.report.files[name];
-            if *bytes > 1024 * 1024 * 1024
+            if *bytes
+                > match self.report.graph_capacity {
+                    routeweft_dataset::GraphCapacity::City => 1024 * 1024 * 1024,
+                    routeweft_dataset::GraphCapacity::Regional => 16 * 1024 * 1024 * 1024,
+                }
                 || file.metadata()?.len() != *bytes
                 || hash_file(&path)? != *digest
             {
@@ -323,6 +331,9 @@ pub fn publish_block_ways(
     options: BinaryWriteOptions,
 ) -> Result<PublicationReport> {
     let source = Source::open(input)?;
+    if source.report.graph_capacity != options.graph_capacity {
+        return Err(invalid("publication capacity mismatch").into());
+    }
     let report = &source.report;
     let result = write_binary_streaming(
         output,
@@ -338,6 +349,8 @@ pub fn publish_block_ways(
         options,
     );
     let input_report = InputReport {
+        maxspeed_policy: source.report.maxspeed_policy,
+        maxspeed_diagnostics: source.report.maxspeed_diagnostics.clone(),
         valid: result.is_ok(),
         failure_code: result
             .as_ref()
