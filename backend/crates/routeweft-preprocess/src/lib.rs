@@ -212,6 +212,15 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
     let mut nodes = Vec::new();
     let mut mapping = BTreeMap::new();
     for id in used {
+        if nodes.len() >= routeweft_dataset::LoadOptions::default().max_nodes {
+            return Err(routeweft_dataset::resource_limit(
+                "graph_nodes",
+                1_000_000,
+                nodes.len() as u64 + 1,
+                "graph_build",
+            )
+            .into());
+        }
         mapping.insert(id, nodes.len());
         nodes.push(osm.nodes[&id].point);
     }
@@ -267,7 +276,13 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
                     continue;
                 }
                 if edges.len() >= 2_000_000 {
-                    return Err(DataError::LimitExceeded.into());
+                    return Err(routeweft_dataset::resource_limit(
+                        "graph_edges",
+                        2_000_000,
+                        edges.len() as u64 + 1,
+                        "graph_build",
+                    )
+                    .into());
                 }
                 by_way.entry(way.id).or_default().push(edges.len());
                 edges.push(Edge {
@@ -454,12 +469,16 @@ fn input(input: &Path, options: BuildOptions) -> Result<(Graph, InputReport)> {
             ..Default::default()
         }),
     };
-    if std::fs::metadata(input)
+    let input_bytes = std::fs::metadata(input)
         .map_err(|e| input_error(DataError::Io(e)))?
-        .len()
-        > 512 * 1024 * 1024
-    {
-        return Err(input_error(DataError::LimitExceeded));
+        .len();
+    if input_bytes > 512 * 1024 * 1024 {
+        return Err(input_error(routeweft_dataset::resource_limit(
+            "input_bytes",
+            512 * 1024 * 1024,
+            input_bytes,
+            "input",
+        )));
     }
     let source = routeweft_dataset::hash_file(input).map_err(input_error)?;
     let result = (|| {
