@@ -505,3 +505,181 @@ fn binary_v2_cli_preserves_driving_results_and_v1_default() {
     assert!(!bad.exists());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn explicit_external_builder_matches_memory_v2_and_queries_for_both_policies() {
+    let root = temp("routeweft-cli-external");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("input.pbf");
+    let scratch = root.join("scratch");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--dense", "--restriction-case", "valid"])
+        .status()
+        .unwrap()
+        .success());
+    for policy in ["reject", "block_ways"] {
+        let memory = root.join(format!("memory-{policy}"));
+        let external = root.join(format!("external-{policy}"));
+        let mut results = Vec::new();
+        for (builder, output) in [("memory", &memory), ("external", &external)] {
+            let mut args = vec![
+                "build",
+                "--input",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--profile",
+                "driving",
+                "--format",
+                "2",
+                "--builder",
+                builder,
+                "--invalid-restrictions",
+                policy,
+            ];
+            if builder == "external" {
+                args.extend(["--scratch-dir", scratch.to_str().unwrap()]);
+            }
+            let (code, response) = command(&args);
+            assert_eq!(code, 0, "{response}");
+            if builder == "external" {
+                assert_eq!(response["build"]["builder"], "external");
+                assert_eq!(response["build"]["resources"]["peak_completed_files"], 18);
+            }
+            results.push(response);
+        }
+        assert_eq!(results[0]["manifest"], results[1]["manifest"]);
+        assert_eq!(results[0]["report"], results[1]["report"]);
+        for file in ["graph.bin", "manifest.json"] {
+            assert_eq!(
+                std::fs::read(memory.join(file)).unwrap(),
+                std::fs::read(external.join(file)).unwrap()
+            );
+        }
+        for query in [
+            vec!["verify"],
+            vec!["nearest", "--coordinate", "0.0005,0"],
+            vec!["route", "--coordinates", "0.0002,0;0.0008,0;0.002,0.0005"],
+        ] {
+            let mut a = query.clone();
+            a.extend(["--dataset", memory.to_str().unwrap()]);
+            let mut b = query;
+            b.extend(["--dataset", external.to_str().unwrap()]);
+            assert_eq!(command(&a), command(&b));
+        }
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        let (code, _) = command(&[
+            "build",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            external.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--format",
+            "2",
+            "--builder",
+            "external",
+        ]);
+        assert_eq!(code, 4);
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    }
+    let (_, version) = command(&["version"]);
+    assert_eq!(
+        version["capabilities"]["build_modes"],
+        serde_json::json!(["memory", "external"])
+    );
+    assert_eq!(version["capabilities"]["external_memory_build"], false);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn external_cli_validates_options_and_reports_budget_deadline_and_restrictions() {
+    let root = temp("routeweft-cli-external-errors");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("input.pbf");
+    let output = root.join("dataset");
+    let scratch = root.join("scratch");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--restriction-case", "missing-via"])
+        .status()
+        .unwrap()
+        .success());
+    let base = vec![
+        "build",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--profile",
+        "driving",
+    ];
+    for extra in [
+        vec!["--builder", "unknown"],
+        vec!["--builder", "external"],
+        vec!["--scratch-dir", "unused"],
+        vec![
+            "--builder",
+            "external",
+            "--format",
+            "2",
+            "--max-scratch-bytes",
+            "-1",
+        ],
+        vec![
+            "--builder",
+            "external",
+            "--format",
+            "2",
+            "--build-timeout-ms",
+            "not-a-number",
+        ],
+    ] {
+        let mut args = base.clone();
+        args.extend(extra);
+        let (code, value) = command(&args);
+        assert_eq!(code, 2, "{value}");
+        assert!(!output.exists());
+    }
+    let mut base = base;
+    base.extend([
+        "--builder",
+        "external",
+        "--format",
+        "2",
+        "--scratch-dir",
+        scratch.to_str().unwrap(),
+    ]);
+    let (code, rejected) = command(&base);
+    assert_eq!(code, 4);
+    assert_eq!(
+        rejected["error"]["details"]["failure_code"],
+        "InvalidRestriction"
+    );
+    assert_eq!(
+        rejected["error"]["details"]["restriction_diagnostics"][0]["code"],
+        "MissingVia"
+    );
+    for (flag, value, code, kind) in [
+        ("--max-scratch-bytes", "1", 4, "BudgetExceeded"),
+        ("--max-scratch-files", "1", 4, "BudgetExceeded"),
+        ("--build-timeout-ms", "0", 5, "BudgetExceeded"),
+    ] {
+        let mut args = base.clone();
+        args.extend([flag, value]);
+        let (actual_code, response) = command(&args);
+        assert_eq!(actual_code, code, "{response}");
+        assert_eq!(response["error"]["kind"], kind);
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
