@@ -375,6 +375,21 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
 }
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--version"] || args == ["-V"] {
+        let build: Value = serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/build-identity.json"
+        )))
+        .expect("build identity");
+        println!(
+            "routeweft {} (commit={} dirty={} source={})",
+            env!("CARGO_PKG_VERSION"),
+            build["git_commit"].as_str().unwrap_or("unknown"),
+            build["source_dirty"],
+            build["source_identity_kind"].as_str().unwrap()
+        );
+        return ExitCode::SUCCESS;
+    }
     if args.is_empty() || args == ["--help"] || args == ["-h"] {
         println!("{HELP}");
         return ExitCode::SUCCESS;
