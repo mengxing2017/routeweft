@@ -55,7 +55,7 @@ backend/target/release/routeweft route \
 
 结果为 JSON，路线包含几何、米制距离、秒制预计耗时、分段及基本步骤。`NoSegment` 表示没有找到支持范围内的道路候选，`NoRoute` 表示当前图和规则下查询无路；二者均返回退出码 3。完整参数、预算和错误见 [CLI](cli.md)。
 
-当前是静态汽车子集，条件规则保守处理；CLI 输入 PBF 上限为 512 MiB，另有解码、对象和图容量限制，查询要求经纬跨度各不超过 5°。文件小于上限也不保证满足其他容量限制。优先使用城市级数据，不将省域、全国地图构建能力视作路由容量承诺。详见 [profile](driving-profile.md)、[数据格式](dataset-format.md) 和 [性能记录](performance.md)。
+当前是静态汽车子集，条件规则保守处理；CLI 输入 PBF 上限为 512 MiB，另有解码、对象和图容量限制，默认 city 查询要求经纬跨度各不超过 5°；显式 regional 档位允许各 10°，构建须使用 external/v2，并为完整图查询设置合适的加载预算，见 [CLI 容量档位](cli.md#显式大图容量档位)。文件小于上限也不保证满足其他容量限制。优先使用城市级数据，不将省域、全国地图构建能力视作路由容量承诺。详见 [profile](driving-profile.md)、[数据格式](dataset-format.md) 和 [性能记录](performance.md)。
 
 ## 消费者接入
 
