@@ -249,3 +249,38 @@ fn binary_v2_publication_is_deterministic_bounded_and_integrity_checked() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn seek_validator_authenticates_payload_and_enforces_workspace_and_format() {
+    use routeweft_dataset::{validate_binary_streaming, write_with_format, DatasetFormat};
+    let path = temp();
+    let expected = write_with_format(
+        &path,
+        &graph(),
+        hash(b"streaming"),
+        None,
+        BTreeMap::new(),
+        DatasetFormat::BinaryV2,
+    )
+    .unwrap();
+    assert_eq!(
+        validate_binary_streaming(&path, Default::default(), 1024 * 1024).unwrap(),
+        expected
+    );
+    assert!(validate_binary_streaming(&path, Default::default(), 0).is_err());
+    // Coordinate change remains semantically valid; only authentication detects it.
+    let payload = path.join("graph.bin");
+    let mut bytes = std::fs::read(&payload).unwrap();
+    let dictionary_bytes = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
+    let coordinate = 64 + dictionary_bytes as usize;
+    bytes[coordinate..coordinate + 8].copy_from_slice(&0.002_f64.to_le_bytes());
+    std::fs::write(&payload, bytes).unwrap();
+    assert!(validate_binary_streaming(&path, Default::default(), 1024 * 1024).is_err());
+    std::fs::remove_dir_all(&path).unwrap();
+    write(&path, &graph(), hash(b"v1"), None, BTreeMap::new()).unwrap();
+    assert!(matches!(
+        validate_binary_streaming(&path, Default::default(), 1024 * 1024),
+        Err(routeweft_dataset::Error::IncompatibleFormat)
+    ));
+    std::fs::remove_dir_all(path).unwrap();
+}
