@@ -49,14 +49,20 @@ pub struct Osm {
     driving_projection: bool,
     counts: [u64; 3],
     decoded_bytes: u64,
+    streaming: bool,
 }
 impl Osm {
     fn charge(&mut self, bytes: usize) -> Result<()> {
         let observed = self.counts.iter().sum::<u64>() + 1;
-        if observed > OBJECTS as u64 {
+        let objects = if self.streaming {
+            STREAM_OBJECTS
+        } else {
+            OBJECTS as u64
+        };
+        if observed > objects {
             return Err(resource_limit(
                 "osm_objects",
-                OBJECTS as u64,
+                objects,
                 observed,
                 "pbf_decode",
             ));
@@ -65,10 +71,22 @@ impl Osm {
             .estimated_bytes
             .checked_add(bytes)
             .ok_or(Error::LimitExceeded)?;
-        if self.estimated_bytes > 512 * 1024 * 1024 {
+        // Streaming releases each record after the sink call. This counter is
+        // cumulative work, not retained memory; batches and records are bounded
+        // independently by the destination. In-memory decode keeps its old cap.
+        let bytes = if self.streaming {
+            STREAM_OBJECT_BYTES
+        } else {
+            512 * 1024 * 1024
+        };
+        if self.estimated_bytes as u64 > bytes {
             return Err(resource_limit(
-                "estimated_osm_bytes",
-                512 * 1024 * 1024,
+                if self.streaming {
+                    "osm_work_bytes"
+                } else {
+                    "estimated_osm_bytes"
+                },
+                bytes,
                 self.estimated_bytes as u64,
                 "pbf_decode",
             ));
@@ -81,6 +99,11 @@ fn tag_bytes(tags: &Tags) -> usize {
 }
 const BLOCK: usize = 32 * 1024 * 1024;
 const OBJECTS: usize = 2_000_000;
+// External decode work limits, independent of resident-object capacity.
+// These are finite processing allowances, not a province/3 GiB support claim.
+pub const STREAM_OBJECTS: u64 = 100_000_000;
+pub const STREAM_OBJECT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+pub const STREAM_DECODED_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 #[derive(Clone, Copy)]
 enum Value<'a> {
     Int(u64),
@@ -566,7 +589,9 @@ fn decode(
             "pbf_read",
         ));
     }
+    let streaming = sink.is_some();
     let mut osm = Osm {
+        streaming,
         scan_only,
         driving_projection,
         ..Default::default()
@@ -624,10 +649,15 @@ fn decode(
             raw
         };
         decoded = decoded.checked_add(raw.len()).ok_or(Error::LimitExceeded)?;
-        if decoded > 512 * 1024 * 1024 {
+        let decoded_limit = if streaming {
+            STREAM_DECODED_BYTES
+        } else {
+            512 * 1024 * 1024
+        };
+        if decoded as u64 > decoded_limit {
             return Err(resource_limit(
                 "decoded_bytes",
-                512 * 1024 * 1024,
+                decoded_limit,
                 decoded as u64,
                 "pbf_decode",
             ));
@@ -771,6 +801,7 @@ mod tests {
             ] {
                 let options = crate::BuildOptions {
                     invalid_restrictions: policy,
+                    ..Default::default()
                 };
                 assert_eq!(
                     format!("{:?}", crate::prepare(&full, options)),
@@ -1036,6 +1067,43 @@ mod tests {
         assert_eq!(resource.resource, "osm_objects");
         assert_eq!(resource.observed, OBJECTS as u64 + 1);
         assert_eq!(resource.stage, "pbf_decode");
+    }
+    #[test]
+    fn streaming_work_is_independent_of_resident_capacity_and_still_bounded() {
+        let mut osm = Osm {
+            scan_only: true,
+            streaming: true,
+            counts: [OBJECTS as u64, 0, 0],
+            estimated_bytes: 512 * 1024 * 1024,
+            ..Default::default()
+        };
+        emit_node(
+            &mut osm,
+            Node {
+                id: 1,
+                point: Point { lon: 0., lat: 0. },
+                tags: Tags::new(),
+            },
+            &mut Some(&mut Discard),
+        )
+        .unwrap();
+        assert_eq!(osm.counts[0], OBJECTS as u64 + 1);
+        assert!(osm.nodes.is_empty() && osm.relation_ids.is_empty());
+        osm.counts = [STREAM_OBJECTS, 0, 0];
+        let Error::ResourceLimit(resource) = osm.charge(128).unwrap_err() else {
+            panic!("missing object limit")
+        };
+        assert_eq!(resource.resource, "osm_objects");
+        assert_eq!(resource.limit, STREAM_OBJECTS);
+        assert_eq!(resource.observed, STREAM_OBJECTS + 1);
+        osm.counts = [0; 3];
+        osm.estimated_bytes = STREAM_OBJECT_BYTES as usize;
+        let Error::ResourceLimit(resource) = osm.charge(128).unwrap_err() else {
+            panic!("missing work limit")
+        };
+        assert_eq!(resource.resource, "osm_work_bytes");
+        assert_eq!(resource.limit, STREAM_OBJECT_BYTES);
+        assert_eq!(resource.observed, STREAM_OBJECT_BYTES + 128);
     }
     #[test]
     fn rejects_overflows_and_truncation_without_panicking() {
