@@ -37,10 +37,10 @@ pub(crate) fn conditional(rel: &Relation) -> bool {
 pub(crate) fn resolve(
     rel: &Relation,
     osm: &Osm,
-    mapping: &BTreeMap<i64, usize>,
+    mapping: &[i64],
     by_way: &BTreeMap<i64, Vec<usize>>,
     edges: &[Edge],
-    outgoing: &[Vec<usize>],
+    outgoing: &routeweft_dataset::Adjacency,
 ) -> std::result::Result<Resolved, Box<RestrictionDiagnostic>> {
     let fail = |code, message: &str| Box::new(RestrictionDiagnostic::new(rel, code, message));
     let from: Vec<_> = rel.members.iter().filter(|m| m.role == "from").collect();
@@ -164,7 +164,7 @@ pub(crate) fn resolve(
             }
             let before = sequences.len();
             if node_via {
-                let Some(&node) = mapping.get(&via[0].id) else {
+                let Ok(node) = mapping.binary_search(&via[0].id) else {
                     return Err(fail(
                         "UnresolvedRestriction",
                         "via-node has no retained road connection",
@@ -255,7 +255,7 @@ pub(crate) fn resolve(
 #[allow(clippy::too_many_arguments)]
 fn paths(
     edges: &[Edge],
-    outgoing: &[Vec<usize>],
+    outgoing: &routeweft_dataset::Adjacency,
     ways: &[i64],
     index: usize,
     path: Vec<usize>,

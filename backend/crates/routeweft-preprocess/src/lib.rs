@@ -7,7 +7,7 @@ pub use diagnostics::{
     RestrictionDiagnostic, Result,
 };
 use pbf::{Osm, Tags};
-use routeweft_dataset::{Edge, Error as DataError, Graph, Manifest, Point};
+use routeweft_dataset::{Adjacency, Edge, Error as DataError, Graph, Manifest, Point};
 fn invalid(message: impl Into<String>) -> Error {
     routeweft_dataset::invalid(message).into()
 }
@@ -210,8 +210,8 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
         selected.push((way, direction, forward, backward));
     }
     let mut nodes = Vec::new();
-    let mut mapping = BTreeMap::new();
-    for id in used {
+    let mapping: Vec<i64> = used.into_iter().collect();
+    for &id in &mapping {
         if nodes.len() >= routeweft_dataset::LoadOptions::default().max_nodes {
             return Err(routeweft_dataset::resource_limit(
                 "graph_nodes",
@@ -221,7 +221,6 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
             )
             .into());
         }
-        mapping.insert(id, nodes.len());
         nodes.push(osm.nodes[&id].point);
     }
     if let Some(first) = nodes.first() {
@@ -246,8 +245,12 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
             if blocked.contains(&pair[0]) || blocked.contains(&pair[1]) {
                 continue;
             }
-            let from = mapping[&pair[0]];
-            let to = mapping[&pair[1]];
+            let from = mapping
+                .binary_search(&pair[0])
+                .map_err(|_| invalid("selected node mapping"))?;
+            let to = mapping
+                .binary_search(&pair[1])
+                .map_err(|_| invalid("selected node mapping"))?;
             let a = nodes[from];
             let b = nodes[to];
             if (a.lon - b.lon).abs() > 180. || a.lat.abs() > 85. || b.lat.abs() > 85. {
@@ -301,10 +304,9 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
     if nodes.is_empty() || edges.is_empty() {
         return Err(invalid("no driving roads"));
     }
-    let mut outgoing = vec![Vec::new(); nodes.len()];
-    for (id, e) in edges.iter().enumerate() {
-        outgoing[e.from].push(id);
-    }
+    drop(blocked);
+    drop(conditional_ways);
+    let outgoing = Adjacency::new(nodes.len(), &edges)?;
     let mut forbidden = BTreeSet::new();
     let mut only: BTreeMap<Vec<usize>, BTreeSet<usize>> = BTreeMap::new();
     let mut failures = Vec::new();
@@ -375,6 +377,9 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
             }
         }
     }
+    drop(mapping);
+    drop(by_way);
+    drop(outgoing);
     let graph = Graph {
         nodes,
         edges,
