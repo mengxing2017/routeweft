@@ -10,6 +10,7 @@ routeweft-domain.workspace = true
 routeweft-dataset.workspace = true
 flate2.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
