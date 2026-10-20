@@ -27,6 +27,232 @@ fn temp(name: &str) -> PathBuf {
     ))
 }
 #[test]
+fn invalid_maxspeed_requires_opt_in_and_matches_both_builders() {
+    let root = temp("routeweft-maxspeed");
+    std::fs::create_dir_all(&root).unwrap();
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    let input = root.join("source.pbf");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--maxspeed", "辅路", "--restriction-case", "valid"])
+        .status()
+        .unwrap()
+        .success());
+    let source = input.to_str().unwrap();
+    let (code, strict) = command(&["preflight", "--input", source, "--profile", "driving"]);
+    assert_eq!(code, 4, "{strict}");
+    assert_eq!(
+        strict["error"]["details"]["failure_code"],
+        "InvalidMaxspeed"
+    );
+    assert_eq!(
+        strict["error"]["details"]["maxspeed_diagnostics"][0]["value"],
+        "辅路"
+    );
+    let (code, preflight) = command(&[
+        "preflight",
+        "--input",
+        source,
+        "--profile",
+        "driving",
+        "--invalid-maxspeed",
+        "use_default",
+    ]);
+    assert_eq!(code, 0, "{preflight}");
+    let mut results = Vec::new();
+    for mode in ["memory", "external"] {
+        let rejected = root.join(format!("rejected-{mode}"));
+        let (code, failure) = command(&[
+            "build",
+            "--input",
+            source,
+            "--profile",
+            "driving",
+            "--builder",
+            mode,
+            "--format",
+            "2",
+            "--output",
+            rejected.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 4, "{failure}");
+        assert_eq!(
+            failure["error"]["details"]["maxspeed_diagnostics"],
+            strict["error"]["details"]["maxspeed_diagnostics"]
+        );
+        assert!(!rejected.exists());
+        let output = root.join(mode);
+        let (code, built) = command(&[
+            "build",
+            "--input",
+            source,
+            "--profile",
+            "driving",
+            "--builder",
+            mode,
+            "--format",
+            "2",
+            "--output",
+            output.to_str().unwrap(),
+            "--invalid-maxspeed",
+            "use_default",
+        ]);
+        assert_eq!(code, 0, "{built}");
+        assert_eq!(built["report"], preflight["report"]);
+        assert_eq!(built["report"]["maxspeed_policy"], "use_default");
+        assert_eq!(
+            built["report"]["maxspeed_diagnostics"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            built["report"]["maxspeed_diagnostics"][0]["effective_kmh"],
+            30.0
+        );
+        assert_eq!(
+            built["manifest"]["diagnostics"]["maxspeed_fallback_values"],
+            2
+        );
+        let (code, verified) = command(&["verify", "--dataset", output.to_str().unwrap()]);
+        assert_eq!(code, 0, "{verified}");
+        let (code, route) = command(&[
+            "route",
+            "--dataset",
+            output.to_str().unwrap(),
+            "--coordinates",
+            "0.0002,0;0.0018,0",
+        ]);
+        assert_eq!(code, 0, "{route}");
+        results.push((
+            built["report"].clone(),
+            route,
+            std::fs::read(output.join("graph.bin")).unwrap(),
+        ));
+    }
+    assert_eq!(results[0], results[1]);
+    for args in [
+        vec![
+            "preflight",
+            "--input",
+            source,
+            "--profile",
+            "driving",
+            "--mode",
+            "structure",
+            "--invalid-maxspeed",
+            "use_default",
+        ],
+        vec![
+            "preflight",
+            "--input",
+            source,
+            "--profile",
+            "driving",
+            "--invalid-maxspeed",
+            "guess",
+        ],
+    ] {
+        assert_eq!(command(&args).0, 2);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+#[ignore = "scale regression: decodes and externally sorts over two million objects"]
+fn external_build_crosses_memory_object_limit_without_losing_graph_or_validation() {
+    let root = temp("routeweft-cli-scale");
+    std::fs::create_dir_all(&root).unwrap();
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    let input = root.join("large.pbf");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--padding-nodes", "2000000"])
+        .status()
+        .unwrap()
+        .success());
+    let source = input.to_str().unwrap();
+    let (code, failure) = command(&["preflight", "--input", source, "--profile", "driving"]);
+    assert_eq!(code, 4, "{failure}");
+    assert_eq!(failure["error"]["resource"]["resource"], "osm_objects");
+    assert_eq!(failure["error"]["resource"]["observed"], 2_000_001);
+    let output = root.join("dataset");
+    let scratch = root.join("scratch");
+    let (code, built) = command(&[
+        "build",
+        "--input",
+        source,
+        "--profile",
+        "driving",
+        "--builder",
+        "external",
+        "--format",
+        "2",
+        "--output",
+        output.to_str().unwrap(),
+        "--scratch-dir",
+        scratch.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{built}");
+    assert_eq!(built["report"]["valid"], true);
+    assert_eq!(built["report"]["nodes"], 4);
+    let (code, verified) = command(&["verify", "--dataset", output.to_str().unwrap()]);
+    assert_eq!(code, 0, "{verified}");
+    let (code, route) = command(&[
+        "route",
+        "--dataset",
+        output.to_str().unwrap(),
+        "--coordinates",
+        "0.0002,0;0.0018,0",
+    ]);
+    assert_eq!(code, 0, "{route}");
+    let (code, nearest) = command(&[
+        "nearest",
+        "--dataset",
+        output.to_str().unwrap(),
+        "--coordinate",
+        "0.0005,0",
+    ]);
+    assert_eq!(code, 0, "{nearest}");
+    assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+    // Append an existing node in a new data block, preserving a valid header.
+    let generator =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .args(["-c", "import runpy,sys; g=runpy.run_path(sys.argv[1]); f=open(sys.argv[2], 'ab'); g['append_padding'](f, 1); f.close()"])
+        .arg(generator)
+        .arg(&input)
+        .status().unwrap().success());
+    let rejected = root.join("rejected");
+    let (code, failure) = command(&[
+        "build",
+        "--input",
+        source,
+        "--profile",
+        "driving",
+        "--builder",
+        "external",
+        "--format",
+        "2",
+        "--output",
+        rejected.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 4, "{failure}");
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate or unordered staged object"),
+        "{failure}"
+    );
+    assert!(!rejected.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn generated_pbf_to_cli_route_and_corrupt_input() {
     let root = temp("routeweft-cli");
     std::fs::create_dir_all(&root).unwrap();
@@ -589,6 +815,18 @@ fn explicit_external_builder_matches_memory_v2_and_queries_for_both_policies() {
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
     }
     let (_, version) = command(&["version"]);
+    assert_eq!(version["capabilities"]["limits"]["osm_objects"], 2_000_000);
+    assert_eq!(
+        version["capabilities"]["external_decode_limits"],
+        serde_json::json!({
+            "input_bytes": 536870912_u64,
+            "osm_objects": 100_000_000_u64,
+            "osm_work_bytes": 68_719_476_736_u64,
+            "decoded_bytes": 17_179_869_184_u64,
+            "kind": "cumulative_work_not_retained_memory"
+        })
+    );
+
     assert_eq!(
         version["capabilities"]["build_modes"],
         serde_json::json!(["memory", "external"])
@@ -680,6 +918,79 @@ fn external_cli_validates_options_and_reports_budget_deadline_and_restrictions()
         assert_eq!(response["error"]["kind"], kind);
         assert!(!output.exists());
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn regional_cli_requires_external_v2_and_enforces_query_memory_budget() {
+    let root = temp("routeweft-regional-cli");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("source.pbf");
+    let output = root.join("dataset");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--restriction-case", "valid"])
+        .status()
+        .unwrap()
+        .success());
+    let base = vec![
+        "build",
+        "--input",
+        input.to_str().unwrap(),
+        "--profile",
+        "driving",
+        "--output",
+        output.to_str().unwrap(),
+        "--graph-capacity",
+        "regional",
+    ];
+    for extra in [vec![], vec!["--builder", "external", "--format", "1"]] {
+        let mut args = base.clone();
+        args.extend(extra);
+        assert_eq!(command(&args).0, 2);
+        assert!(!output.exists());
+    }
+    let mut args = base;
+    args.extend(["--builder", "external", "--format", "2"]);
+    let (code, built) = command(&args);
+    assert_eq!(code, 0, "{built}");
+    for cmd in ["verify", "inspect"] {
+        let (code, verified) = command(&[
+            cmd,
+            "--dataset",
+            output.to_str().unwrap(),
+            "--graph-capacity",
+            "regional",
+        ]);
+        assert_eq!(code, 0, "{verified}");
+        assert_eq!(verified["verified"], true);
+    }
+    let query = [
+        "nearest",
+        "--dataset",
+        output.to_str().unwrap(),
+        "--coordinate",
+        "0,0",
+        "--graph-capacity",
+        "regional",
+        "--max-load-bytes",
+    ];
+    for (limit, expected) in [("1", 4), ("invalid", 2)] {
+        let mut args = query.to_vec();
+        args.push(limit);
+        let (code, error) = command(&args);
+        assert_eq!(code, expected, "{error}");
+        if expected == 4 {
+            assert_eq!(
+                error["error"]["resource"]["resource"],
+                "estimated_resident_bytes"
+            );
+            assert_eq!(error["error"]["resource"]["stage"], "engine_load");
+        }
     }
     std::fs::remove_dir_all(root).unwrap();
 }
