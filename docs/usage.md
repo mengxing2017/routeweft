@@ -54,7 +54,7 @@ backend/target/release/routeweft route \
 
 ## 城市输入预检与独立复核
 
-先运行 `routeweft preflight --input city.osm.pbf --profile driving --json`。转向限制失败时，使用关系 ID 对比原始输入与切片，见 [数据提取和排查](data-sources.md)。只有人工审核过覆盖损失后，才考虑 [显式保守模式](cli.md#限制关系诊断与显式保守模式)。默认严格失败不会改变。
+可先运行 `routeweft preflight --input city.osm.pbf --profile driving --mode structure --json` 做低内存结构/容量排查；它不验证引用、重复 ID 或驾驶规则。需要完整提前检查时运行默认 full 预检；build 本身也执行完整检查并返回报告，无需为常规构建重复执行完整预检。转向限制失败时，使用关系 ID 对比原始输入与切片，见 [数据提取和排查](data-sources.md)。只有人工审核过覆盖损失后，才考虑 [显式保守模式](cli.md#限制关系诊断与显式保守模式)。默认严格失败不会改变。
 
 本项目提供独立验证脚本，需 Python 3.12+，使用显式本地文件，不下载数据。以下坐标及 policy 对应固定南宁切片，输出目录必须不存在；其他输入须替换成经过审核的成功与无路坐标：
 

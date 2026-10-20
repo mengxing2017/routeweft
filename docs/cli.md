@@ -5,9 +5,9 @@
 | 命令 | 必须参数 | 行为 |
 | --- | --- | --- |
 | build | --input、--profile driving、--output | 从本地 PBF 构建，不覆盖已有目录 |
-| preflight | --input、--profile driving | 内存建图校验，不写数据集 |
+| preflight | --input、--profile driving | 默认 full 内存建图；可显式 --mode structure 低内存结构/容量扫描 |
 | version | 无 | 返回工具版本和能力，不加载数据集 |
-| inspect | --dataset | 完整校验后返回 manifest，非不校验的快速读取 |
+| inspect | --dataset | 默认完整校验；--mode metadata 仅读取 manifest，verified=false |
 | verify | --dataset | 完整校验后返回 verified=true 与 manifest |
 | nearest | --dataset、--coordinate lon,lat | 返回有限方向候选及 dataset/profile/format |
 | route | --dataset、--coordinates lon,lat;lon,lat | 返回几何、米/秒成本、分段、步骤、吸附位置及身份 |
@@ -35,9 +35,46 @@ routeweft version --json
 routeweft preflight --input city.osm.pbf --profile driving --json
 ```
 
-`version` 返回 version、cli_schema、dataset_formats、profiles、commands 和 invalid_restriction_policies。version 是 Cargo 包版本，不是唯一源码身份；集成仍需固定 Git 提交、Cargo.lock、构建回执和二进制 SHA-256。CLI schema=1 是包络版本，dataset format=1 是磁盘格式，driving-v1 是规则版本，builder 是构建器版本字符串，四者不可互相替代。
+`version` 返回 version、cli_schema、dataset_formats、profiles、commands、invalid_restriction_policies 和 capabilities。capabilities 声明固定容量、全内存构建/查询、预检模式及缓存能力；当前 external_memory_build=false、large_pbf_3gib=false，不能据文件大小自行扩大支持范围。version 是 Cargo 包版本，不是唯一源码身份；集成仍需固定 Git 提交、Cargo.lock、构建回执和二进制 SHA-256。CLI schema=1 是包络版本，dataset format=1 是磁盘格式，driving-v1 是规则版本，builder 是构建器版本字符串，四者不可互相替代。
 
-`preflight` 使用与 build 相同的解码、规则、建图和限制解析路径，在内存构建并校验后丢弃图，不创建数据集。它不是廉价文件头检查，也不保证磁盘空间、输出路径、序列化文件大小或实际查询性能。成功返回 report；失败退出 4，不在 stdout 混入日志。
+默认 `preflight --mode full` 使用与 build 相同的解码、规则、建图和限制解析路径，在内存构建并校验后丢弃图，不创建数据集。它不是廉价文件头检查，也不保证磁盘空间、输出路径、序列化文件大小或实际查询性能。成功返回 report；失败退出 4，不在 stdout 混入日志。
+
+### 低内存结构扫描与元信息读取
+
+```bash
+routeweft preflight --input city.osm.pbf --profile driving --mode structure --json
+routeweft inspect --dataset dataset/ --mode metadata --json
+```
+
+structure 使用相同的单块解码器，但不保留全局 node/way/relation 集合，不建图、不检查重复 ID、引用闭包或驾驶/限制规则。成功报告明确 `validation_scope=structure_only`、`semantic_validation=false`、`duplicate_ids_checked=false`，包含源哈希、对象数、累计解压字节及完整解码预计保留的对象字节数。后者不是扫描进程的 RSS。它仍执行当前构建器的容量门槛；超限提前失败时不代表已经扫描完全部输入。该模式拒绝 `--invalid-restrictions`，不能把结构通过当作完整预检通过。
+
+metadata 仅检查 manifest 结构、声明容量及内容身份，不打开 graph.json，返回 `verified=false`、`verification_scope=manifest_only`。默认 inspect 与 verify 仍加载图并校验完整性和拓扑。元信息读取不能代替交付校验，也不认证来源。
+
+build 本身执行完整语义检查并返回审计 report；若不需要提前排查，可直接构建并验证报告，避免先完整 preflight 再重复建图。当前没有阶段缓存或恢复功能。输入容量见下节，数据集限制见 [数据集格式](dataset-format.md)。
+
+### 输入容量与资源边界
+
+当前构建器使用全内存对象与图，不支持外存构建。输入须同时满足以下限制，压缩文件较小也可能因对象或解码规模超限而被拒绝：
+
+| 资源 | 上限 | 含义 |
+| --- | ---: | --- |
+| input_bytes | 512 MiB | 压缩 PBF 大小 |
+| blob_bytes / raw_block_bytes | 各 32 MiB | 单块 blob 大小 / 声明解压大小 |
+| decoded_bytes | 512 MiB | 累计解压处理量 |
+| estimated_osm_bytes | 512 MiB | 完整 OSM 对象保留估算 |
+| osm_objects | 2,000,000 | node、way、relation 合计 |
+
+上述限制是独立容量门槛，不是进程 RSS 保证；对象估算不包含全部临时缓冲、图和查询索引。数据集还受 [图文件和对象数量限制](dataset-format.md) 约束。CLI 不提供调高上述限制的参数，也不提供 scratch、阶段缓存、恢复或 RSS 硬预算参数。宿主应根据实际资源设置进程级资源限制。
+
+### 容量错误
+
+主要输入、解码、对象和图容量错误在原有 kind/退出码之外返回 `error.resource`：
+
+```json
+{"resource":"osm_objects","limit":2000000,"observed":2000001,"stage":"pbf_decode"}
+```
+
+按 resource/stage 分型，不解析 message。主要阶段为 input、pbf_read、pbf_decode、graph_build、graph_validation、dataset_manifest、dataset_read、dataset_write。estimated_osm_bytes 是对象估算，decoded_bytes 是累计处理工作量，均不是进程内存硬限制。resource 为可选字段；部分容量或解析错误仅返回 kind/message，调用方应处理字段缺失。
 
 ## 限制关系诊断与显式保守模式
 
