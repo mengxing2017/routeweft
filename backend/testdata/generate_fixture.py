@@ -36,8 +36,8 @@ def block(kind, raw, compressed):
     header = data(1, kind.encode()) + integer(3, len(blob))
     return struct.pack('>I', len(header)) + header + blob
 
-def fixture(dense=False, compressed=True, restriction_case=None):
-    strings = ['', 'highway', 'residential', 'maxspeed', '36', 'name', 'Synthetic Road',
+def fixture(dense=False, compressed=True, restriction_case=None, maxspeed="36"):
+    strings = ['', 'highway', 'residential', 'maxspeed', maxspeed, 'name', 'Synthetic Road',
                'type', 'restriction', 'no_right_turn', 'from', 'to', 'via']
     table = b''.join(data(1, s.encode()) for s in strings)
     points = [(0, 0), (10000, 0), (20000, 0), (20000, 10000)]  # lon, lat / 1e7
@@ -70,11 +70,57 @@ def fixture(dense=False, compressed=True, restriction_case=None):
     header = data(4,b'OsmSchema-V0.6') + (data(4,b'DenseNodes') if dense else b'')
     return block('OSMHeader',header,compressed) + block('OSMData',data(1,table)+data(2,group),compressed)
 
+def append_padding(output, count):
+    """Stream isolated nodes in small blocks to exercise cumulative decode limits.
+
+    IDs start after the four routable fixture nodes. No roads or coverage from
+    the base fixture are removed. Each block stays well below per-block limits.
+    """
+    for start in range(5, count + 5, 8192):
+        size = min(8192, count + 5 - start)
+        nodes = (packed(1, [zig(start)] + [zig(1)] * (size - 1))
+                 + packed(8, [0] * size) + packed(9, [0] * size))
+        output.write(block('OSMData', data(1, data(1, b'')) + data(2, data(2, nodes)), True))
+
+def chain(output, count):
+    """Stream a connected synthetic road exceeding legacy graph capacity."""
+    output.write(block('OSMHeader', data(4, b'OsmSchema-V0.6') + data(4, b'DenseNodes'), True))
+    for start in range(1, count + 1, 8192):
+        size = min(8192, count + 1 - start)
+        nodes = (packed(1, [zig(start)] + [zig(1)] * (size - 1))
+                 + packed(8, [0] * size)
+                 + packed(9, [zig((start - 1) * 10)] + [zig(10)] * (size - 1)))
+        output.write(block('OSMData', data(1, data(1, b'')) + data(2, data(2, nodes)), True))
+    table = b''.join(data(1, value) for value in [b'', b'highway', b'residential'])
+    group = bytearray()
+    for way, start in enumerate(range(1, count, 256), 1):
+        size = min(257, count + 1 - start)
+        payload = (integer(1, way) + packed(2, [1]) + packed(3, [2])
+                   + packed(8, [zig(start)] + [zig(1)] * (size - 1)))
+        group.extend(data(3, payload))
+        if way % 128 == 0:
+            output.write(block('OSMData', data(1, table) + data(2, group), True))
+            group.clear()
+    if group:
+        output.write(block('OSMData', data(1, table) + data(2, group), True))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output',type=Path)
     parser.add_argument('--dense',action='store_true')
     parser.add_argument('--raw',action='store_true')
     parser.add_argument('--restriction-case', choices=['missing-via', 'missing-reference', 'valid'])
+    parser.add_argument('--padding-nodes', type=int, default=0)
+    parser.add_argument('--maxspeed', default='36')
+    parser.add_argument('--chain-nodes', type=int, default=0)
     args = parser.parse_args()
-    args.output.write_bytes(fixture(args.dense,not args.raw,args.restriction_case))
+    if args.padding_nodes < 0:
+        parser.error('--padding-nodes must be nonnegative')
+    if args.chain_nodes and not 2 <= args.chain_nodes <= 10000000:
+        parser.error('--chain-nodes must be between 2 and 10000000')
+    with args.output.open('wb') as output:
+        if args.chain_nodes:
+            chain(output, args.chain_nodes)
+        else:
+            output.write(fixture(args.dense or args.padding_nodes > 0,not args.raw,args.restriction_case,args.maxspeed))
+            append_padding(output, args.padding_nodes)
