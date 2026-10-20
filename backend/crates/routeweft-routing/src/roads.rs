@@ -135,24 +135,58 @@ pub struct Engine {
     outgoing: Adjacency,
     index: RTree<Indexed>,
     cos_lat: f64,
+    local_projection: bool,
     restrictions: Restrictions,
 }
 fn dataset_error(e: routeweft_dataset::Error) -> Error {
     match e {
         routeweft_dataset::Error::Io(_) => Error::Io,
         routeweft_dataset::Error::IncompatibleFormat => Error::IncompatibleFormat,
+        routeweft_dataset::Error::ResourceLimit(_) | routeweft_dataset::Error::LimitExceeded => {
+            Error::BudgetExceeded
+        }
         _ => Error::InvalidDataset,
     }
 }
 impl Engine {
     pub fn open(path: &Path, options: LoadOptions) -> Result<Self, Error> {
+        Self::open_with_capacity(path, options, routeweft_dataset::GraphCapacity::City)
+    }
+    pub fn open_with_capacity(
+        path: &Path,
+        mut options: LoadOptions,
+        capacity: routeweft_dataset::GraphCapacity,
+    ) -> Result<Self, Error> {
+        let caps = capacity.limits();
+        options.max_nodes = options.max_nodes.min(caps.max_nodes);
+        options.max_edges = options.max_edges.min(caps.max_edges);
+        options.max_bytes = options.max_bytes.min(caps.max_bytes);
+        let manifest = routeweft_dataset::inspect_manifest(path, options).map_err(dataset_error)?;
+        routeweft_dataset::check_resident_budget(&manifest, options, true)
+            .map_err(dataset_error)?;
         let (m, g) = routeweft_dataset::open(path, options).map_err(dataset_error)?;
-        Self::from_graph(m, g)
+        Self::from_graph_with_options(m, g, options, capacity)
     }
     pub fn from_graph(manifest: Manifest, graph: Graph) -> Result<Self, Error> {
-        graph
-            .validate(LoadOptions::default())
-            .map_err(dataset_error)?;
+        Self::from_graph_with_options(
+            manifest,
+            graph,
+            LoadOptions::default(),
+            routeweft_dataset::GraphCapacity::City,
+        )
+    }
+    fn from_graph_with_options(
+        manifest: Manifest,
+        graph: Graph,
+        options: LoadOptions,
+        capacity: routeweft_dataset::GraphCapacity,
+    ) -> Result<Self, Error> {
+        graph.validate(options).map_err(dataset_error)?;
+        let mut actual = manifest.clone();
+        actual.nodes = graph.nodes.len();
+        actual.edges = graph.edges.len();
+        actual.restrictions = graph.forbidden.len();
+        routeweft_dataset::check_resident_budget(&actual, options, true).map_err(dataset_error)?;
         let min_lon = graph
             .nodes
             .iter()
@@ -173,12 +207,15 @@ impl Engine {
             .iter()
             .map(|p| p.lat)
             .fold(f64::NEG_INFINITY, f64::max);
-        if max_lon - min_lon > 5. || max_lat - min_lat > 5. {
+        if max_lon - min_lon > capacity.max_span_degrees()
+            || max_lat - min_lat > capacity.max_span_degrees()
+        {
             return Err(Error::InvalidDataset);
         }
         let cos_lat = ((min_lat + max_lat) / 2.).to_radians().cos();
         let project = |p: Point| [p.lon.to_radians() * R * cos_lat, p.lat.to_radians() * R];
-        let outgoing = Adjacency::new(graph.nodes.len(), &graph.edges).map_err(dataset_error)?;
+        let outgoing = Adjacency::with_limits(graph.nodes.len(), &graph.edges, options)
+            .map_err(dataset_error)?;
         let mut entries = Vec::new();
         for (id, e) in graph.edges.iter().enumerate() {
             entries.push(Indexed {
@@ -196,6 +233,7 @@ impl Engine {
             outgoing,
             index: RTree::bulk_load(entries),
             cos_lat,
+            local_projection: capacity == routeweft_dataset::GraphCapacity::Regional,
             restrictions,
         })
     }
@@ -241,8 +279,21 @@ impl Engine {
             let e = &self.graph.edges[item.id];
             let a = self.graph.nodes[e.from];
             let b = self.graph.nodes[e.to];
+            // Regional snapping uses the query latitude, avoiding distortion
+            // from a single map-centre latitude across the larger extent. The
+            // R-tree still uses the common projection and conservative envelope.
+            let snap = |q: Point| {
+                if self.local_projection {
+                    [
+                        q.lon.to_radians() * R * point.lat.to_radians().cos(),
+                        q.lat.to_radians() * R,
+                    ]
+                } else {
+                    self.projected(q)
+                }
+            };
             let (fraction, _) =
-                crate::geometry::project_point_on_segment(self.projected(a), self.projected(b), p)
+                crate::geometry::project_point_on_segment(snap(a), snap(b), snap(point))
                     .ok_or(Error::InvalidInput)?;
             let projected = Point {
                 lon: a.lon + (b.lon - a.lon) * fraction,
