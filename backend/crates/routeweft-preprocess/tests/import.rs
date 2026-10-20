@@ -472,3 +472,29 @@ fn excluding_the_only_allowed_exit_never_opens_other_turns() {
     assert_eq!(report.blocked_way_ids, [10, 40]);
     assert!(g.edges.iter().all(|e| e.way != 10));
 }
+
+#[test]
+fn compact_node_lookup_preserves_signed_sparse_ids_and_via_node_rules() {
+    let mut osm = network();
+    osm.relations.push(relation("only_straight_on", true));
+    let expected = graph(&osm).unwrap();
+    let ids = [i64::MIN, -9000, -1, 0, 9000, i64::MAX];
+    let remap = |id: i64| ids[(id - 1) as usize];
+    for (old_id, mut node) in std::mem::take(&mut osm.nodes) {
+        node.id = remap(old_id);
+        osm.nodes.insert(node.id, node);
+    }
+    for way in osm.ways.values_mut() {
+        for id in &mut way.refs {
+            *id = remap(*id);
+        }
+    }
+    for rel in &mut osm.relations {
+        for member in &mut rel.members {
+            if member.kind == 0 {
+                member.id = remap(member.id);
+            }
+        }
+    }
+    assert_eq!(graph(&osm).unwrap(), expected);
+}
