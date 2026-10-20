@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -14,6 +14,23 @@ pub enum Error {
     InvalidDataset(String),
     IncompatibleFormat,
     LimitExceeded,
+    ResourceLimit(ResourceLimit),
+}
+/// A deterministic implementation budget, not an OS RSS guarantee.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceLimit {
+    pub resource: String,
+    pub limit: u64,
+    pub observed: u64,
+    pub stage: String,
+}
+pub fn resource_limit(resource: &str, limit: u64, observed: u64, stage: &str) -> Error {
+    Error::ResourceLimit(ResourceLimit {
+        resource: resource.into(),
+        limit,
+        observed,
+        stage: stage.into(),
+    })
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,11 +133,21 @@ pub fn hash_file(path: &Path) -> Result<String> {
 }
 impl Graph {
     pub fn validate(&self, limits: LoadOptions) -> Result<()> {
-        if self.nodes.is_empty()
-            || self.nodes.len() > limits.max_nodes
-            || self.edges.len() > limits.max_edges
-        {
-            return Err(Error::LimitExceeded);
+        if self.nodes.is_empty() {
+            return Err(invalid("empty graph"));
+        }
+        for (resource, observed, limit) in [
+            ("graph_nodes", self.nodes.len(), limits.max_nodes),
+            ("graph_edges", self.edges.len(), limits.max_edges),
+        ] {
+            if observed > limit {
+                return Err(resource_limit(
+                    resource,
+                    limit as u64,
+                    observed as u64,
+                    "graph_validation",
+                ));
+            }
         }
         for p in &self.nodes {
             p.coordinate()?;
@@ -145,11 +172,15 @@ impl Graph {
             total = total
                 .checked_add(sequence.len())
                 .ok_or(Error::LimitExceeded)?;
-            if total > limits.max_restriction_edges
-                || sequence.len() < 2
-                || sequence.len() > 256
-                || !unique.insert(sequence)
-            {
+            if total > limits.max_restriction_edges {
+                return Err(resource_limit(
+                    "restriction_edges",
+                    limits.max_restriction_edges as u64,
+                    total as u64,
+                    "graph_validation",
+                ));
+            }
+            if sequence.len() < 2 || sequence.len() > 256 || !unique.insert(sequence) {
                 return Err(invalid("restriction size/duplicate"));
             }
             if sequence.iter().any(|&id| id >= self.edges.len())
@@ -181,6 +212,91 @@ fn read_controlled(root: &Path, name: &str, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+fn json_stream_error(error: serde_json::Error) -> Error {
+    if let Some(kind) = error.io_error_kind() {
+        Error::Io(std::io::Error::new(kind, error))
+    } else {
+        invalid(error.to_string())
+    }
+}
+fn controlled_file(root: &Path, name: &str, limit: u64) -> Result<File> {
+    let path = root.join(name);
+    let meta = fs::symlink_metadata(&path)?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(invalid("non-regular dataset file"));
+    }
+    let file = File::open(path)?;
+    if file.metadata()?.len() > limit {
+        return Err(resource_limit(
+            "graph_bytes",
+            limit,
+            file.metadata()?.len(),
+            "dataset_read",
+        ));
+    }
+    Ok(file)
+}
+struct DigestReader<R> {
+    inner: R,
+    digest: Sha256,
+    bytes: u64,
+    limit: u64,
+    exceeded: Option<u64>,
+}
+impl<R> DigestReader<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            digest: Sha256::new(),
+            bytes: 0,
+            limit,
+            exceeded: None,
+        }
+    }
+    fn finish(self) -> (u64, String) {
+        (self.bytes, format!("{:x}", self.digest.finalize()))
+    }
+}
+impl<R: Read> Read for DigestReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let allowed = self
+            .limit
+            .saturating_sub(self.bytes)
+            .saturating_add(1)
+            .min(buf.len() as u64) as usize;
+        let n = self.inner.read(&mut buf[..allowed])?;
+        self.bytes = self.bytes.saturating_add(n as u64);
+        if self.bytes > self.limit {
+            self.exceeded = Some(self.bytes);
+            return Err(std::io::Error::other("graph byte budget exceeded"));
+        }
+        self.digest.update(&buf[..n]);
+        Ok(n)
+    }
+}
+struct DigestWriter<W> {
+    inner: W,
+    digest: Sha256,
+    bytes: u64,
+    limit: u64,
+    exceeded: Option<u64>,
+}
+impl<W: Write> Write for DigestWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let observed = self.bytes.saturating_add(buf.len() as u64);
+        if observed > self.limit {
+            self.exceeded = Some(observed);
+            return Err(std::io::Error::other("graph byte budget exceeded"));
+        }
+        let n = self.inner.write(buf)?;
+        self.digest.update(&buf[..n]);
+        self.bytes += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 fn identity(m: &Manifest) -> String {
     hash(
         format!(
@@ -190,7 +306,9 @@ fn identity(m: &Manifest) -> String {
         .as_bytes(),
     )
 }
-pub fn open(path: &Path, limits: LoadOptions) -> Result<(Manifest, Graph)> {
+/// Validate manifest syntax, declared limits and content identity only.
+/// Does not read or authenticate graph bytes or check topology.
+pub fn inspect_manifest(path: &Path, limits: LoadOptions) -> Result<Manifest> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(invalid("dataset directory symlink"));
     }
@@ -208,22 +326,60 @@ pub fn open(path: &Path, limits: LoadOptions) -> Result<(Manifest, Graph)> {
     {
         return Err(invalid("source hash"));
     }
-    if manifest.graph_file != "graph.json"
-        || manifest.profile != "driving-v1"
-        || manifest.graph_bytes > limits.max_bytes
-        || manifest.nodes > limits.max_nodes
-        || manifest.edges > limits.max_edges
-    {
+    if manifest.graph_file != "graph.json" || manifest.profile != "driving-v1" {
         return Err(invalid("manifest contract"));
     }
-    let bytes = read_controlled(path, "graph.json", limits.max_bytes)?;
-    if bytes.len() as u64 != manifest.graph_bytes
-        || hash(&bytes) != manifest.graph_sha256
+    for (resource, observed, limit) in [
+        ("graph_bytes", manifest.graph_bytes, limits.max_bytes),
+        (
+            "graph_nodes",
+            manifest.nodes as u64,
+            limits.max_nodes as u64,
+        ),
+        (
+            "graph_edges",
+            manifest.edges as u64,
+            limits.max_edges as u64,
+        ),
+    ] {
+        if observed > limit {
+            return Err(resource_limit(
+                resource,
+                limit,
+                observed,
+                "dataset_manifest",
+            ));
+        }
+    }
+    if manifest.graph_sha256.len() != 64
+        || !manifest.graph_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || identity(&manifest) != manifest.dataset_id
+    {
+        return Err(invalid("manifest identity"));
+    }
+    Ok(manifest)
+}
+pub fn open(path: &Path, limits: LoadOptions) -> Result<(Manifest, Graph)> {
+    let manifest = inspect_manifest(path, limits)?;
+    let file = controlled_file(path, "graph.json", limits.max_bytes)?;
+    let mut reader = BufReader::new(DigestReader::new(file, limits.max_bytes));
+    let parsed = serde_json::from_reader::<_, Graph>(&mut reader);
+    if let Some(observed) = reader.get_ref().exceeded {
+        return Err(resource_limit(
+            "graph_bytes",
+            limits.max_bytes,
+            observed,
+            "dataset_read",
+        ));
+    }
+    let graph = parsed.map_err(json_stream_error)?;
+    let (bytes, digest) = reader.into_inner().finish();
+    if bytes != manifest.graph_bytes
+        || digest != manifest.graph_sha256
         || identity(&manifest) != manifest.dataset_id
     {
         return Err(invalid("integrity"));
     }
-    let graph: Graph = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
     graph.validate(limits)?;
     if graph.nodes.len() != manifest.nodes
         || graph.edges.len() != manifest.edges
@@ -258,10 +414,33 @@ pub fn write(
     let stage = parent.join(format!(".routeweft-{}-{nonce}", std::process::id()));
     fs::create_dir(&stage)?;
     let result = (|| {
-        let bytes = serde_json::to_vec(graph).map_err(|e| invalid(e.to_string()))?;
-        if bytes.len() as u64 > LoadOptions::default().max_bytes {
-            return Err(Error::LimitExceeded);
+        let graph_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(stage.join("graph.json"))?;
+        let mut writer = BufWriter::new(DigestWriter {
+            inner: graph_file,
+            digest: Sha256::new(),
+            bytes: 0,
+            limit: LoadOptions::default().max_bytes,
+            exceeded: None,
+        });
+        let serialized = serde_json::to_writer(&mut writer, graph);
+        let flushed = writer.flush();
+        if let Some(observed) = writer.get_ref().exceeded {
+            return Err(resource_limit(
+                "graph_bytes",
+                writer.get_ref().limit,
+                observed,
+                "dataset_write",
+            ));
         }
+        serialized.map_err(json_stream_error)?;
+        flushed?;
+        writer.get_ref().inner.sync_all()?;
+        let writer = writer.into_inner().map_err(|e| Error::Io(e.into_error()))?;
+        let graph_bytes = writer.bytes;
+        let graph_sha256 = format!("{:x}", writer.digest.finalize());
         let mut m = Manifest {
             format: 1,
             dataset_id: String::new(),
@@ -273,29 +452,31 @@ pub fn write(
                 "© OpenStreetMap contributors; ODbL 1.0; https://www.openstreetmap.org/copyright"
                     .into(),
             graph_file: "graph.json".into(),
-            graph_sha256: hash(&bytes),
-            graph_bytes: bytes.len() as u64,
+            graph_sha256,
+            graph_bytes,
             nodes: graph.nodes.len(),
             edges: graph.edges.len(),
             restrictions: graph.forbidden.len(),
             diagnostics,
         };
         m.dataset_id = identity(&m);
-        for (name, content) in [
-            ("graph.json", bytes),
-            (
-                "manifest.json",
-                serde_json::to_vec_pretty(&m).map_err(|e| invalid(e.to_string()))?,
-            ),
-        ] {
-            let mut f = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(stage.join(name))?;
-            f.write_all(&content)?;
-            f.sync_all()?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(stage.join("manifest.json"))?;
+        serde_json::to_writer_pretty(&mut file, &m).map_err(|e| invalid(e.to_string()))?;
+        file.sync_all()?;
+        // Graph was validated before serialization. Recheck persisted bytes without
+        // allocating a second Graph while the caller's Graph is still alive.
+        if hash_file(&stage.join("graph.json"))? != m.graph_sha256
+            || fs::metadata(stage.join("graph.json"))?.len() != m.graph_bytes
+        {
+            return Err(invalid("persisted graph integrity"));
         }
-        open(&stage, LoadOptions::default())?;
+        let persisted = inspect_manifest(&stage, LoadOptions::default())?;
+        if persisted != m {
+            return Err(invalid("persisted manifest integrity"));
+        }
         // Refuse existing targets immediately before publication as well.
         if path.exists() {
             return Err(invalid("output already exists"));
@@ -374,4 +555,27 @@ fn restrictions_decode<'de, D: serde::Deserializer<'de>>(
         }
     }
     d.deserialize_seq(Visitor)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    #[test]
+    fn growth_during_streaming_read_and_write_cannot_bypass_byte_budget() {
+        let mut reader = DigestReader::new(&b"123456"[..], 5);
+        let mut bytes = Vec::new();
+        assert!(reader.read_to_end(&mut bytes).is_err());
+        assert_eq!(reader.exceeded, Some(6));
+        let mut writer = DigestWriter {
+            inner: Vec::new(),
+            digest: Sha256::new(),
+            bytes: 0,
+            limit: 5,
+            exceeded: None,
+        };
+        writer.write_all(b"123").unwrap();
+        assert!(writer.write_all(b"456").is_err());
+        assert_eq!(writer.inner, b"123");
+        assert_eq!(writer.exceeded, Some(6));
+    }
 }
