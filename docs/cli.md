@@ -1,6 +1,12 @@
 # CLI schema 1
 
-`routeweft --help` 显示命令。除帮助外，所有成功和错误均为单行 JSON，stdout 只含协议数据；日志预留 stderr。`--json` 是显式标记，省略后也输出 JSON。重复/未知选项、位置参数和缺失值拒绝。
+`routeweft --help` 显示命令。除帮助和 `--version` / `-V` 文本别名外，所有成功和错误均为单行 JSON，stdout 只含协议数据；日志预留 stderr。`--json` 是显式标记，省略后也输出 JSON。重复/未知选项、位置参数和缺失值拒绝。
+
+`version --json` 保留既有字段，并新增 `build`：`git_commit` 是完整源码提交号，`source_dirty` 是源码修改状态，无法确认时两者为 null；`source_identity_kind` 为 `git`、`git-archive`、`provided` 或 `unknown`。`target`、`profile`、`rustc` 记录编译环境。身份在编译时固定，不查询运行目录、Git 或网络。dirty 或 unknown 构建的 `release_eligible=false`，不得用于正式发布；该字段仅为来源状态提示，不构成可信签名。
+
+Git checkout 自动采集整个仓库（含未忽略的未跟踪文件）的状态。无 `.git` 的源码归档默认返回 unknown，不会借用外层仓库身份。可信归档流水线可同时设置 `ROUTEWEFT_BUILD_COMMIT`（40 位十六进制提交号）、`ROUTEWEFT_BUILD_SOURCE_DIRTY`（true/false）、`ROUTEWEFT_BUILD_SOURCE_KIND`（git-archive/provided）后编译；缺少任一字段或格式错误则编译失败。这些声明由流水线负责核验，不会自动验证归档内容。每次 Cargo 构建都会重新采集身份，避免 HEAD、工作区或注入来源变化后复用旧元数据；不记录非确定构建时间。
+
+安装器应独立校验来源锁、安装回执、实际二进制 SHA-256 与内嵌提交；旧 CLI 缺少 `build` 时须明确标记为外部来源验证。内嵌身份不能替代可信构建记录或文件摘要，缓存也不能仅以包版本为键。
 
 | 命令 | 必须参数 | 行为 |
 | --- | --- | --- |
