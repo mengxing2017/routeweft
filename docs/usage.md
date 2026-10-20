@@ -30,7 +30,7 @@ backend/target/release/routeweft verify --dataset ./datasets/city-driving-v1 --j
 backend/target/release/routeweft inspect --dataset ./datasets/city-driving-v1 --json
 ```
 
-构建前先创建输出的父目录（例如 `mkdir -p datasets`），不要预先创建数据集目录本身。构建后目录包含 `manifest.json` 和 `graph.json`；部署时完整复制该目录，再在目标机器执行 verify。
+构建前先创建输出的父目录（例如 `mkdir -p datasets`），不要预先创建数据集目录本身。默认构建后目录包含 `manifest.json` 和 `graph.json`；显式指定 `--format 2` 则使用 `graph.bin`，需支持 v2 的工具读取。部署时完整复制该目录，再在目标机器执行 verify。两种格式均不扩大输入容量。
 
 以下是 Monaco 范围内的示例坐标，仅在输入覆盖该区域且附近道路可通行时适用；使用其他城市时替换坐标。顺序为 **经度,纬度**：
 

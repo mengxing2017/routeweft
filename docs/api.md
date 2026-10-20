@@ -34,4 +34,6 @@ NodeEngine 保留节点级 P0 搜索，只有合成图用途，不提供持久�
 
 预处理错误类型为 `routeweft_preprocess::Error`，保留底层 source 和结构化 report；不再要求调用者解析 InvalidDataset 的文本。Relation 现在保留源 id；直接构造测试 OSM 时须提供唯一关系 ID。消费者应固定提交并重新编译，不能假定 0.x 内部类型向后兼容。
 
-InputReport 是构建审计，不是可传给查询引擎的路由图。保存它与输入/工具身份；Engine 仍加载原有 format=1 数据集。策略含义和诊断分类见 [CLI](cli.md)。
+InputReport 是构建审计，不是可传给查询引擎的路由图。保存它与输入/工具身份；Engine::open 自动读取 format=1/2 数据集。策略含义和诊断分类见 [CLI](cli.md)。
+
+`build_with_options` 和 `routeweft_dataset::write` 默认生成 v1。显式选择二进制可调用 `build_with_format(input, output, options, routeweft_dataset::DatasetFormat::BinaryV2)`，已有 Graph 可调用 `routeweft_dataset::write_with_format`。两者保留原有审计与不可变发布规则；v2 不改变 Engine 的驻内存模型。格式契约见 [Dataset v2](dataset-format-v2.md)。

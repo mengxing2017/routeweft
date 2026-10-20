@@ -4,13 +4,22 @@
 
 | 命令 | 必须参数 | 行为 |
 | --- | --- | --- |
-| build | --input、--profile driving、--output | 从本地 PBF 构建，不覆盖已有目录 |
+| build | --input、--profile driving、--output | 从本地 PBF 构建，不覆盖已有目录；--format 1（默认）或 2 |
 | preflight | --input、--profile driving | 默认 full 内存建图；可显式 --mode structure 低内存结构/容量扫描 |
 | version | 无 | 返回工具版本和能力，不加载数据集 |
 | inspect | --dataset | 默认完整校验；--mode metadata 仅读取 manifest，verified=false |
 | verify | --dataset | 完整校验后返回 verified=true 与 manifest |
 | nearest | --dataset、--coordinate lon,lat | 返回有限方向候选及 dataset/profile/format |
 | route | --dataset、--coordinates lon,lat;lon,lat | 返回几何、米/秒成本、分段、步骤、吸附位置及身份 |
+
+可选二进制存储：
+
+```bash
+routeweft build --input city.osm.pbf --profile driving --format 2 --output city-binary/
+routeweft verify --dataset city-binary/ --json
+```
+
+`--format` 仅用于 build；verify/inspect/nearest/route 根据 manifest 自动选择读取器。v1 是默认格式，v2 使用 graph.bin 和名称/类别字典，详见 [v2 格式](dataset-format-v2.md)。`version.dataset_formats` 和 `capabilities.dataset_write_formats` 声明 `[1,2]`，两种格式均为全内存构图与加载，v2 不扩大输入或图容量上限。
 
 查询选项：`--radius-m` 默认 1000，`--max-work` 默认 2,000,000，`--max-states` 默认 250,000，`--max-queue` 默认 500,000，`--timeout-ms` 默认 10,000。deadline 从数据集加载完成后开始，限制实际查询计算，不包括进程启动/加载；宿主如需请求总时限，应在库外统筹。
 
@@ -35,7 +44,7 @@ routeweft version --json
 routeweft preflight --input city.osm.pbf --profile driving --json
 ```
 
-`version` 返回 version、cli_schema、dataset_formats、profiles、commands、invalid_restriction_policies 和 capabilities。capabilities 声明固定容量、全内存构建/查询、预检模式及缓存能力；当前 external_memory_build=false、large_pbf_3gib=false，不能据文件大小自行扩大支持范围。version 是 Cargo 包版本，不是唯一源码身份；集成仍需固定 Git 提交、Cargo.lock、构建回执和二进制 SHA-256。CLI schema=1 是包络版本，dataset format=1 是磁盘格式，driving-v1 是规则版本，builder 是构建器版本字符串，四者不可互相替代。
+`version` 返回 version、cli_schema、dataset_formats、profiles、commands、invalid_restriction_policies 和 capabilities。capabilities 声明固定容量、全内存构建/查询、预检模式及缓存能力；当前 external_memory_build=false、large_pbf_3gib=false，不能据文件大小自行扩大支持范围。version 是 Cargo 包版本，不是唯一源码身份；集成仍需固定 Git 提交、Cargo.lock、构建回执和二进制 SHA-256。CLI schema=1 是包络版本，dataset format=1/2 是磁盘格式，driving-v1 是规则版本，builder 是构建器版本字符串，四者不可互相替代。
 
 默认 `preflight --mode full` 使用与 build 相同的解码、规则、建图和限制解析路径，在内存构建并校验后丢弃图，不创建数据集。它不是廉价文件头检查，也不保证磁盘空间、输出路径、序列化文件大小或实际查询性能。成功返回 report；失败退出 4，不在 stdout 混入日志。
 
@@ -48,7 +57,7 @@ routeweft inspect --dataset dataset/ --mode metadata --json
 
 structure 使用相同的单块解码器，但不保留全局 node/way/relation 集合，不建图、不检查重复 ID、引用闭包或驾驶/限制规则。成功报告明确 `validation_scope=structure_only`、`semantic_validation=false`、`duplicate_ids_checked=false`，包含源哈希、对象数、累计解压字节及完整解码预计保留的对象字节数。后者不是扫描进程的 RSS。它仍执行当前构建器的容量门槛；超限提前失败时不代表已经扫描完全部输入。该模式拒绝 `--invalid-restrictions`，不能把结构通过当作完整预检通过。
 
-metadata 仅检查 manifest 结构、声明容量及内容身份，不打开 graph.json，返回 `verified=false`、`verification_scope=manifest_only`。默认 inspect 与 verify 仍加载图并校验完整性和拓扑。元信息读取不能代替交付校验，也不认证来源。
+metadata 仅检查 manifest 结构、声明容量及内容身份，不打开图文件（graph.json 或 graph.bin），返回 `verified=false`、`verification_scope=manifest_only`。默认 inspect 与 verify 仍加载图并校验完整性和拓扑。元信息读取不能代替交付校验，也不认证来源。
 
 build 本身执行完整语义检查并返回审计 report；若不需要提前排查，可直接构建并验证报告，避免先完整 preflight 再重复建图。当前没有阶段缓存或恢复功能。输入容量见下节，数据集限制见 [数据集格式](dataset-format.md)。
 
