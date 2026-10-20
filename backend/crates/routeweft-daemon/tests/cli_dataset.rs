@@ -276,3 +276,135 @@ fn conservative_cli_policy_is_explicit_and_preserves_auditable_warnings() {
     assert_eq!(code, 2);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn structural_scan_has_explicitly_weaker_scope_and_capacity_diagnostics() {
+    let root = temp("routeweft-structure");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("fixture.pbf");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    // Invalid restrictions are structurally well-formed, but full preflight must reject.
+    for extra in [
+        vec![],
+        vec!["--dense"],
+        vec!["--raw"],
+        vec!["--dense", "--raw"],
+    ] {
+        assert!(Command::new("python3")
+            .arg(&script)
+            .arg(&input)
+            .args(["--restriction-case", "missing-via"])
+            .args(extra)
+            .status()
+            .unwrap()
+            .success());
+        let (code, scan) = command(&[
+            "preflight",
+            "--input",
+            input.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--mode",
+            "structure",
+        ]);
+        assert_eq!(code, 0, "{scan}");
+        assert_eq!(scan["report"]["validation_scope"], "structure_only");
+        assert_eq!(scan["report"]["semantic_validation"], false);
+        assert_eq!(scan["report"]["duplicate_ids_checked"], false);
+        assert!(scan["report"]["nodes"].as_u64().unwrap() > 0);
+        assert!(scan["report"]["decoded_bytes"].as_u64().unwrap() > 0);
+        let (code, _) = command(&[
+            "preflight",
+            "--input",
+            input.to_str().unwrap(),
+            "--profile",
+            "driving",
+        ]);
+        assert_eq!(code, 4);
+        let (code, _) = command(&[
+            "preflight",
+            "--input",
+            input.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--mode",
+            "structure",
+            "--invalid-restrictions",
+            "block_ways",
+        ]);
+        assert_eq!(code, 2);
+    }
+    // Sparse file only tests the admission guard; it is not a large-data acceptance fixture.
+    let large = root.join("too-large.pbf");
+    std::fs::File::create(&large)
+        .unwrap()
+        .set_len(536_870_913)
+        .unwrap();
+    for command_name in ["build", "preflight"] {
+        let output = root.join("must-not-publish");
+        let mut args = vec![
+            command_name,
+            "--input",
+            large.to_str().unwrap(),
+            "--profile",
+            "driving",
+        ];
+        if command_name == "build" {
+            args.extend(["--output", output.to_str().unwrap()]);
+        }
+        let (code, error) = command(&args);
+        assert_eq!(code, 4);
+        assert_eq!(error["error"]["kind"], "BudgetExceeded");
+        assert_eq!(error["error"]["resource"]["resource"], "input_bytes");
+        assert_eq!(error["error"]["resource"]["limit"], 536_870_912_u64);
+        assert_eq!(error["error"]["resource"]["observed"], 536_870_913_u64);
+        assert!(!output.exists());
+    }
+    let (code, version) = command(&["version", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(version["capabilities"]["large_pbf_3gib"], false);
+    assert_eq!(version["capabilities"]["external_memory_build"], false);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn metadata_inspection_is_explicit_and_full_verification_still_detects_corruption() {
+    let root = temp("routeweft-metadata");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("fixture.pbf");
+    let output = root.join("dataset");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    let (code, _) = command(&[
+        "build",
+        "--input",
+        input.to_str().unwrap(),
+        "--profile",
+        "driving",
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    std::fs::write(output.join("graph.json"), b"broken").unwrap();
+    let (code, metadata) = command(&[
+        "inspect",
+        "--dataset",
+        output.to_str().unwrap(),
+        "--mode",
+        "metadata",
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(metadata["verified"], false);
+    assert_eq!(metadata["verification_scope"], "manifest_only");
+    for cmd in ["inspect", "verify"] {
+        assert_eq!(command(&[cmd, "--dataset", output.to_str().unwrap()]).0, 4);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
