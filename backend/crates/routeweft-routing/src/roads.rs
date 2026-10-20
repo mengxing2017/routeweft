@@ -1,5 +1,5 @@
 use crate::{Error, SearchBudget};
-use routeweft_dataset::{Graph, LoadOptions, Manifest, Point};
+use routeweft_dataset::{Adjacency, Graph, LoadOptions, Manifest, Point};
 use routeweft_domain::model::TravelProfile;
 use rstar::{RTree, RTreeObject, AABB};
 use serde::Serialize;
@@ -132,7 +132,7 @@ pub struct RouteResult {
 pub struct Engine {
     pub(crate) graph: Graph,
     manifest: Manifest,
-    outgoing: Vec<Vec<usize>>,
+    outgoing: Adjacency,
     index: RTree<Indexed>,
     cos_lat: f64,
     restrictions: Restrictions,
@@ -178,10 +178,9 @@ impl Engine {
         }
         let cos_lat = ((min_lat + max_lat) / 2.).to_radians().cos();
         let project = |p: Point| [p.lon.to_radians() * R * cos_lat, p.lat.to_radians() * R];
-        let mut outgoing = vec![Vec::new(); graph.nodes.len()];
+        let outgoing = Adjacency::new(graph.nodes.len(), &graph.edges).map_err(dataset_error)?;
         let mut entries = Vec::new();
         for (id, e) in graph.edges.iter().enumerate() {
-            outgoing[e.from].push(id);
             entries.push(Indexed {
                 id,
                 envelope: AABB::from_corners(
@@ -697,7 +696,7 @@ impl Overlay {
             interpolate(g.nodes[e.from], g.nodes[e.to], s.fraction)
         }
     }
-    fn arcs(&self, g: &Graph, outgoing: &[Vec<usize>], vertex: usize) -> Vec<Arc> {
+    fn arcs(&self, g: &Graph, outgoing: &Adjacency, vertex: usize) -> Vec<Arc> {
         if vertex < self.base {
             outgoing[vertex]
                 .iter()
