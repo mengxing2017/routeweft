@@ -1,11 +1,11 @@
-use routeweft_dataset::{LoadOptions, Point};
+use routeweft_dataset::{GraphCapacity, Point};
 use routeweft_routing::{Engine, QueryOptions, SearchBudget};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -103,19 +103,29 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--profile",
             "--output",
             "--invalid-restrictions",
+            "--invalid-maxspeed",
             "--format",
             "--builder",
+            "--graph-capacity",
             "--scratch-dir",
             "--max-scratch-bytes",
             "--max-scratch-files",
             "--build-timeout-ms",
         ],
-        "preflight" => &["--input", "--profile", "--invalid-restrictions", "--mode"],
+        "preflight" => &[
+            "--input",
+            "--profile",
+            "--invalid-restrictions",
+            "--invalid-maxspeed",
+            "--mode",
+        ],
         "version" => &[],
-        "inspect" => &["--dataset", "--mode"],
+        "inspect" => &["--dataset", "--mode", "--graph-capacity"],
         "route" => &[
             "--dataset",
             "--coordinates",
+            "--graph-capacity",
+            "--max-load-bytes",
             "--radius-m",
             "--max-work",
             "--max-states",
@@ -125,13 +135,15 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         "nearest" => &[
             "--dataset",
             "--coordinate",
+            "--graph-capacity",
+            "--max-load-bytes",
             "--radius-m",
             "--max-work",
             "--max-states",
             "--max-queue",
             "--timeout-ms",
         ],
-        _ => &["--dataset"],
+        _ => &["--dataset", "--graph-capacity"],
     };
     let mut flags = BTreeMap::new();
     let mut i = 1;
@@ -171,9 +183,13 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
             "commands":["build","preflight","inspect","verify","nearest","route","version"],
             "invalid_restriction_policies":["reject","block_ways"],
+            "invalid_maxspeed_policies":["reject","use_default"],
             "capabilities": {
                 "builder":"in_memory", "build_modes":["memory","external"],
                 "external_build_formats":[2], "external_memory_build":false,
+                "graph_capacity_profiles": {"city":{"nodes":1000000,"edges":2000000,"bytes":268435456,"span_degrees":5},
+                    "regional":{"nodes":8000000,"edges":16000000,"bytes":2147483648_u64,"span_degrees":10,"builder":"external","format":2}},
+                "v2_verify":"streaming", "runtime_memory_budget_kind":"estimated_allocations_not_rss",
                 "large_pbf_3gib":false, "dataset_access":"in_memory",
                 "preflight":"full_semantic_build", "preflight_cache":false,
                 "preflight_modes":["full","structure"],
@@ -184,9 +200,24 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                     "blob_bytes":33554432,"graph_bytes":268435456,
                     "graph_nodes":1000000,"graph_edges":2000000,
                     "restriction_edges":1000000,"v2_graph_string_bytes":268435456},
+                "external_decode_limits": {"input_bytes":536870912,
+                    "osm_objects":routeweft_preprocess::pbf::STREAM_OBJECTS,
+                    "osm_work_bytes":routeweft_preprocess::pbf::STREAM_OBJECT_BYTES,
+                    "decoded_bytes":routeweft_preprocess::pbf::STREAM_DECODED_BYTES,
+                    "kind":"cumulative_work_not_retained_memory"},
                 "memory_limit_kind":"estimated_objects_not_rss"
             }}),
         );
+    }
+    let graph_capacity = match flags.get("--graph-capacity").copied().unwrap_or("city") {
+        "city" => GraphCapacity::City,
+        "regional" => GraphCapacity::Regional,
+        _ => return Err(bad("invalid graph capacity; use city or regional")),
+    };
+    let mut load_limits = graph_capacity.limits();
+    if let Some(value) = flags.get("--max-load-bytes") {
+        load_limits.max_resident_bytes =
+            value.parse().map_err(|_| bad("invalid --max-load-bytes"))?;
     }
     if command == "build" || command == "preflight" {
         if required("--profile")? != "driving" {
@@ -199,6 +230,11 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             });
         }
         let options = routeweft_preprocess::BuildOptions {
+            invalid_maxspeed: match flags.get("--invalid-maxspeed").copied().unwrap_or("reject") {
+                "reject" => routeweft_preprocess::InvalidMaxspeedPolicy::Reject,
+                "use_default" => routeweft_preprocess::InvalidMaxspeedPolicy::UseDefault,
+                _ => return Err(bad("invalid maxspeed policy; use reject or use_default")),
+            },
             invalid_restrictions: match flags
                 .get("--invalid-restrictions")
                 .copied()
@@ -213,8 +249,10 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         if command == "preflight" {
             match flags.get("--mode").copied().unwrap_or("full") {
                 "structure" => {
-                    if flags.contains_key("--invalid-restrictions") {
-                        return Err(bad("structure mode does not apply restriction policies"));
+                    if flags.contains_key("--invalid-restrictions")
+                        || flags.contains_key("--invalid-maxspeed")
+                    {
+                        return Err(bad("structure mode does not apply build policies"));
                     }
                     let report = routeweft_preprocess::pbf::scan(input).map_err(data_error)?;
                     return Ok(json!({"schema":1,"status":"ok","report":report}));
@@ -243,6 +281,11 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         if builder == "memory" && external_flags.iter().any(|key| flags.contains_key(key)) {
             return Err(bad("external build options require --builder external"));
         }
+        if graph_capacity == GraphCapacity::Regional && builder != "external" {
+            return Err(bad(
+                "regional capacity requires --builder external --format 2",
+            ));
+        }
         if builder == "external" {
             if format != routeweft_dataset::DatasetFormat::BinaryV2 {
                 return Err(bad("external builder requires --format 2"));
@@ -267,6 +310,9 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 build: options,
                 ..Default::default()
             };
+            external.stage.graph_capacity = graph_capacity;
+            external.writer.graph_capacity = graph_capacity;
+            external.writer.output_bytes = graph_capacity.limits().max_bytes + 1024 * 1024;
             external.stage.scratch_bytes =
                 number("--max-scratch-bytes", external.stage.scratch_bytes)?;
             external.stage.run_files = usize::try_from(number(
@@ -313,7 +359,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     if command == "inspect" {
         match flags.get("--mode").copied().unwrap_or("full") {
             "metadata" => {
-                let manifest = routeweft_dataset::inspect_manifest(dataset, LoadOptions::default())
+                let manifest = routeweft_dataset::inspect_manifest(dataset, load_limits)
                     .map_err(data_error)?;
                 return Ok(json!({"schema":1,"status":"ok","verified":false,
                     "verification_scope":"manifest_only","manifest":manifest}));
@@ -323,11 +369,22 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         }
     }
     if command == "inspect" || command == "verify" {
-        let (m, _) =
-            routeweft_dataset::open(dataset, LoadOptions::default()).map_err(data_error)?;
+        let metadata =
+            routeweft_dataset::inspect_manifest(dataset, load_limits).map_err(data_error)?;
+        let m = if metadata.format == 2 {
+            routeweft_dataset::validate_binary_streaming(dataset, load_limits, 64 * 1024 * 1024)
+                .map_err(data_error)?
+        } else {
+            routeweft_dataset::open(dataset, load_limits)
+                .map_err(data_error)?
+                .0
+        };
         return Ok(json!({"schema":1,"status":"ok","verified":true,"manifest":m}));
     }
-    let engine = Engine::open(dataset, LoadOptions::default()).map_err(query_error)?;
+    let metadata = routeweft_dataset::inspect_manifest(dataset, load_limits).map_err(data_error)?;
+    routeweft_dataset::check_resident_budget(&metadata, load_limits, true).map_err(data_error)?;
+    let engine =
+        Engine::open_with_capacity(dataset, load_limits, graph_capacity).map_err(query_error)?;
     let number = |key: &str, default: u64| -> Result<u64, Failure> {
         flags
             .get(key)
