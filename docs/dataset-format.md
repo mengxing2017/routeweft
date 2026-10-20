@@ -1,5 +1,7 @@
 # Dataset v1 格式与完整性
 
+本文描述默认 v1 JSON；显式 `build --format 2` 的二进制编码见 [Dataset v2](dataset-format-v2.md)。
+
 目录仅使用 `manifest.json` 和 `graph.json`。两者为 UTF-8 JSON，无二进制端序；整数采用 JSON 十进制表示。不要用 JavaScript Number 无损处理所有 u64 代价。读取器拒绝未知 schema 字段，暂不支持向前兼容拓展。
 
 manifest：format=1、dataset_id、builder 版本、profile=driving-v1、输入 SHA-256、可选 replication 秒级快照、OSM attribution、受控 graph_file、图字节数/SHA-256、节点/方向边/禁止序列计数及构建诊断。核心身份为以下四个字段的固定 UTF-8 拼接 SHA-256：
