@@ -32,14 +32,17 @@ def main():
     parser.add_argument('--no-route-radius-m', type=float, default=1000)
     parser.add_argument('--invalid-restrictions', choices=['reject', 'block_ways'], default='reject')
     parser.add_argument('--format', type=int, choices=[1, 2], default=1)
+    parser.add_argument('--builder', choices=['memory', 'external'], default='memory')
     parser.add_argument('--timeout-s', type=float, default=600)
     args = parser.parse_args()
     if not 0 < args.timeout_s <= 3600:
         parser.error('timeout must be positive and at most 3600 seconds')
+    if args.builder == 'external' and args.format != 2:
+        parser.error('external builder requires --format 2')
     binary, source, root = args.binary.resolve(strict=True), args.input.resolve(strict=True), args.output.resolve()
     root.mkdir(parents=True, exist_ok=False)
     summary = {'input_sha256': digest(source), 'binary_sha256': digest(binary),
-               'policy': args.invalid_restrictions, 'format': args.format, 'status': 'running', 'calls': []}
+               'policy': args.invalid_restrictions, 'format': args.format, 'builder': args.builder, 'status': 'running', 'calls': []}
 
     def call(command, *arguments, expected=0):
         index = len(summary['calls'])
@@ -90,7 +93,8 @@ def main():
         call('version')
         preflight = call('preflight', *common)
         dataset = root / 'dataset'
-        built = call('build', *common, '--format', args.format, '--output', dataset)
+        build_mode = [] if args.builder == 'memory' else ['--builder', 'external']
+        built = call('build', *common, *build_mode, '--format', args.format, '--output', dataset)
         expected_graph = 'graph.json' if args.format == 1 else 'graph.bin'
         if built['manifest']['format'] != args.format or built['manifest']['graph_file'] != expected_graph:
             raise ValueError('dataset format disagreement')
@@ -103,7 +107,7 @@ def main():
         call('verify', '--dataset', dataset)
         summary['route'] = queries(dataset)['route']
         repeated = root / 'repeated'
-        call('build', *common, '--format', args.format, '--output', repeated)
+        call('build', *common, *build_mode, '--format', args.format, '--output', repeated)
         for name in ('manifest.json', expected_graph):
             if digest(dataset / name) != digest(repeated / name):
                 raise ValueError(f'non-deterministic {name}')
