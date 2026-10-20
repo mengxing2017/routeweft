@@ -53,6 +53,75 @@ fn opts() -> QueryOptions {
     }
 }
 #[test]
+fn regional_projection_uses_query_latitude_and_load_budget_precedes_index_build() {
+    use routeweft_dataset::{GraphCapacity, LoadOptions};
+    let root = std::env::temp_dir().join(format!(
+        "regional-routing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let graph = Graph {
+        nodes: vec![p(0., 50.), p(0.01, 50.01), p(7., 58.)],
+        edges: vec![e(0, 1, 1000)],
+        forbidden: vec![],
+    };
+    routeweft_dataset::write_with_format(
+        &root,
+        &graph,
+        "b".repeat(64),
+        None,
+        BTreeMap::new(),
+        routeweft_dataset::DatasetFormat::BinaryV2,
+    )
+    .unwrap();
+    assert!(matches!(
+        Engine::open(&root, LoadOptions::default()),
+        Err(Error::InvalidDataset)
+    ));
+    let mut limits = GraphCapacity::Regional.limits();
+    limits.max_resident_bytes = 1;
+    assert!(matches!(
+        Engine::open_with_capacity(&root, limits, GraphCapacity::Regional),
+        Err(Error::BudgetExceeded)
+    ));
+    let engine = Engine::open_with_capacity(
+        &root,
+        GraphCapacity::Regional.limits(),
+        GraphCapacity::Regional,
+    )
+    .unwrap();
+    let query = p(0.004, 50.006);
+    let nearest = engine
+        .nearest(
+            query,
+            QueryOptions {
+                radius_m: 1000.,
+                ..Default::default()
+            },
+            &SearchBudget::default(),
+        )
+        .unwrap();
+    let cos = query.lat.to_radians().cos();
+    let expected = ((query.lon * cos) * (0.01 * cos) + (query.lat - 50.) * 0.01)
+        / ((0.01 * cos).powi(2) + 0.01_f64.powi(2));
+    assert!((nearest[0].fraction - expected).abs() < 1e-9);
+    let result = engine
+        .route(
+            &[p(0.002, 50.002), p(0.008, 50.008)],
+            QueryOptions {
+                radius_m: 100.,
+                ..Default::default()
+            },
+            &SearchBudget::default(),
+        )
+        .unwrap();
+    assert!((result.duration_s - 0.6).abs() < 0.001);
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn partial_edge_150_distinct_cases() {
     let mut cases = 0;
     for cost in (1000..=10000).step_by(1000) {
