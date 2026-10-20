@@ -1,7 +1,12 @@
 //! Bounded, sorted driving-record staging. This is not a routing dataset builder.
 //! Budgets cover serialized batches and scratch files, not total process RSS.
 mod connection;
-pub use connection::{connect, ConnectionReport};
+pub use connection::{
+    connect, emit_edges, index_adjacency, prepare_block_ways, publish_block_ways,
+    resolve_restrictions, AccessBudget, AdjacencyReport, BlockWaysOptions, BlockWaysReport,
+    ConnectionReport, DiskEdgeAccess, EdgeReport, PublicationReport, RestrictionOptions,
+    RestrictionReport, WayEdgeIndex, WayEdgeLocation,
+};
 
 use crate::pbf::{self, Node, RecordSink, Relation, Way};
 use routeweft_dataset::{hash_file, invalid, resource_limit, Result};

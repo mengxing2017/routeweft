@@ -1,9 +1,19 @@
-//! External node/reference join for an authenticated staging directory.
+//! External node/reference join for a checksummed staging directory.
+mod blockways;
+mod publication;
+pub use publication::{publish_block_ways, PublicationReport};
+mod edges;
 use super::{Record, Run, RunReader, StageOptions, StageReport, NEXT};
 use crate::{blocked_node, count, select_way, Result};
+pub use blockways::{prepare_block_ways, BlockWaysOptions, BlockWaysReport};
+pub use edges::{
+    emit_edges, index_adjacency, resolve_restrictions, AccessBudget, AdjacencyReport,
+    DiskEdgeAccess, EdgeReport, RestrictionOptions, RestrictionReport, WayEdgeIndex,
+    WayEdgeLocation,
+};
 use routeweft_dataset::{hash_file, invalid, resource_limit, Point};
-use serde::Serialize;
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -20,7 +30,7 @@ fn id(key: u64) -> i64 {
 }
 
 /// A joined intermediate, not a routing dataset or restriction validation result.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectionReport {
     pub format_version: u32,
     pub source_records_sha256: String,
@@ -31,6 +41,8 @@ pub struct ConnectionReport {
     pub nodes: u64,
     pub selected_ways: u64,
     pub references: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_way_ids: Vec<i64>,
     pub diagnostics: BTreeMap<String, u64>,
     pub files: BTreeMap<String, (u64, String)>,
     pub peak_scratch_bytes: u64,
@@ -46,6 +58,7 @@ struct Workspace {
     peak_batch: u64,
     serial: u64,
     published: bool,
+    scope: &'static str,
 }
 impl Drop for Workspace {
     fn drop(&mut self) {
@@ -62,10 +75,18 @@ impl Workspace {
             .ok_or_else(|| invalid("join scratch overflow"))?;
         if observed > self.options.scratch_bytes {
             return Err(resource_limit(
-                "join_scratch_bytes",
+                if self.scope == "external_restrictions" {
+                    "restriction_scratch_bytes"
+                } else if self.scope == "external_adjacency" {
+                    "adjacency_scratch_bytes"
+                } else if self.scope == "external_edges" {
+                    "edge_scratch_bytes"
+                } else {
+                    "join_scratch_bytes"
+                },
                 self.options.scratch_bytes,
                 observed,
-                "external_join",
+                self.scope,
             )
             .into());
         }
@@ -76,10 +97,18 @@ impl Workspace {
     fn path(&mut self) -> Result<PathBuf> {
         if self.files >= self.options.run_files {
             return Err(resource_limit(
-                "join_run_files",
+                if self.scope == "external_restrictions" {
+                    "restriction_run_files"
+                } else if self.scope == "external_adjacency" {
+                    "adjacency_run_files"
+                } else if self.scope == "external_edges" {
+                    "edge_run_files"
+                } else {
+                    "join_run_files"
+                },
                 self.options.run_files as u64,
                 self.files as u64 + 1,
-                "external_join",
+                self.scope,
             )
             .into());
         }
@@ -348,8 +377,16 @@ impl Source {
 }
 /// Join selected driving-way references to nodes using disk sorting and lookup.
 /// The source is a completed `stage` directory. No full OSM/ID collection is
-/// loaded. Restriction resolution and BlockWays retries remain future work.
+/// loaded. This entry point applies no explicit exclusions; BlockWays uses a retry coordinator.
 pub fn connect(source: &Path, output: &Path, options: StageOptions) -> Result<ConnectionReport> {
+    connect_excluding(source, output, options, &BTreeSet::new())
+}
+fn connect_excluding(
+    source: &Path,
+    output: &Path,
+    options: StageOptions,
+    excluded: &BTreeSet<i64>,
+) -> Result<ConnectionReport> {
     if options.batch_bytes < WIDTH
         || options.batch_records == 0
         || options.record_bytes == 0
@@ -381,6 +418,7 @@ pub fn connect(source: &Path, output: &Path, options: StageOptions) -> Result<Co
         peak_batch: 0,
         serial: 0,
         published: false,
+        scope: "external_join",
     };
     let mut stats = BTreeMap::from([
         ("input_nodes".into(), source.report.counts[0]),
@@ -412,6 +450,9 @@ pub fn connect(source: &Path, output: &Path, options: StageOptions) -> Result<Co
     let mut profile_error = None;
     source.visit(|record| {
         if let Record::Way(way) = record {
+            if excluded.contains(&way.id) {
+                return Ok(());
+            }
             if profile_error.is_some() {
                 return Ok(());
             }
@@ -530,6 +571,7 @@ pub fn connect(source: &Path, output: &Path, options: StageOptions) -> Result<Co
         nodes: nodes.count,
         selected_ways: selected.count,
         references: references.count,
+        blocked_way_ids: excluded.iter().copied().collect(),
         diagnostics: stats,
         files: BTreeMap::new(),
         peak_scratch_bytes: work.peak,
@@ -571,7 +613,7 @@ mod tests {
     use super::*;
     use crate::pbf::{Member, Node, Osm, Relation, Tags, Way};
     use std::collections::BTreeSet;
-    fn temporary() -> PathBuf {
+    pub(super) fn temporary() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "routeweft-join-test-{}-{}",
             std::process::id(),
@@ -580,7 +622,7 @@ mod tests {
         fs::create_dir(&path).unwrap();
         path
     }
-    fn fixture() -> Osm {
+    pub(super) fn fixture() -> Osm {
         let mut osm = Osm::default();
         for (id, lon, blocked) in [
             (-3, 108.0, true),
@@ -633,7 +675,7 @@ mod tests {
         });
         osm
     }
-    fn source(parent: &Path, osm: &Osm) -> PathBuf {
+    pub(super) fn source(parent: &Path, osm: &Osm) -> PathBuf {
         let dir = parent.join("source");
         fs::create_dir(&dir).unwrap();
         let mut records = Vec::new();
