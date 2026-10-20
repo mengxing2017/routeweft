@@ -31,6 +31,7 @@ def main():
     parser.add_argument('--radius-m', type=float, default=1000)
     parser.add_argument('--no-route-radius-m', type=float, default=1000)
     parser.add_argument('--invalid-restrictions', choices=['reject', 'block_ways'], default='reject')
+    parser.add_argument('--format', type=int, choices=[1, 2], default=1)
     parser.add_argument('--timeout-s', type=float, default=600)
     args = parser.parse_args()
     if not 0 < args.timeout_s <= 3600:
@@ -38,7 +39,7 @@ def main():
     binary, source, root = args.binary.resolve(strict=True), args.input.resolve(strict=True), args.output.resolve()
     root.mkdir(parents=True, exist_ok=False)
     summary = {'input_sha256': digest(source), 'binary_sha256': digest(binary),
-               'policy': args.invalid_restrictions, 'status': 'running', 'calls': []}
+               'policy': args.invalid_restrictions, 'format': args.format, 'status': 'running', 'calls': []}
 
     def call(command, *arguments, expected=0):
         index = len(summary['calls'])
@@ -89,7 +90,10 @@ def main():
         call('version')
         preflight = call('preflight', *common)
         dataset = root / 'dataset'
-        built = call('build', *common, '--output', dataset)
+        built = call('build', *common, '--format', args.format, '--output', dataset)
+        expected_graph = 'graph.json' if args.format == 1 else 'graph.bin'
+        if built['manifest']['format'] != args.format or built['manifest']['graph_file'] != expected_graph:
+            raise ValueError('dataset format disagreement')
         summary['manifest'] = built['manifest']
         summary['report'] = built['report']
         if preflight['report'] != built['report']:
@@ -99,12 +103,12 @@ def main():
         call('verify', '--dataset', dataset)
         summary['route'] = queries(dataset)['route']
         repeated = root / 'repeated'
-        call('build', *common, '--output', repeated)
-        for name in ('manifest.json', 'graph.json'):
+        call('build', *common, '--format', args.format, '--output', repeated)
+        for name in ('manifest.json', expected_graph):
             if digest(dataset / name) != digest(repeated / name):
                 raise ValueError(f'non-deterministic {name}')
         # Preserve policy and relation-level audit alongside the data. This is
-        # supplemental evidence; the engine's v1 format still has two core files.
+        # supplemental evidence; both supported formats have two core files.
         (dataset / 'build-report.json').write_text(json.dumps(built['report'], ensure_ascii=False, indent=2))
         summary['archives'] = []
         for extension in ('zip', 'tar.gz'):
