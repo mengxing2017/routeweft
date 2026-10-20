@@ -1,4 +1,8 @@
 //! Strict little-endian v2 codec. Streamed I/O, with bounded in-memory Graph decode.
+#[path = "stream_write.rs"]
+pub(super) mod stream_write;
+#[path = "streaming.rs"]
+pub(super) mod streaming;
 use super::{invalid, resource_limit, Edge, Error, Graph, LoadOptions, Manifest, Point, Result};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};

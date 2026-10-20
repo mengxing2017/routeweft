@@ -1,13 +1,15 @@
 //! Versioned, bounded, immutable routing dataset. No process-global resources.
 mod adjacency;
 mod binary;
+mod publication;
 pub use adjacency::Adjacency;
+pub use publication::{write_binary_streaming, BinaryMetadata, BinarySource, BinaryWriteOptions};
 use routeweft_domain::model::Coordinate;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -385,6 +387,44 @@ pub fn inspect_manifest(path: &Path, limits: LoadOptions) -> Result<Manifest> {
         || identity(&manifest) != manifest.dataset_id
     {
         return Err(invalid("manifest identity"));
+    }
+    Ok(manifest)
+}
+/// Fully validate an immutable v2 dataset using seeks instead of a resident Graph.
+/// `workspace_bytes` bounds logical dictionary capacity and restriction deduplication
+/// storage, including conservative allocation overhead; it is not an RSS limit.
+/// The directory and its files must remain immutable throughout the call.
+pub fn validate_binary_streaming(
+    path: &Path,
+    limits: LoadOptions,
+    workspace_bytes: u64,
+) -> Result<Manifest> {
+    let manifest = inspect_manifest(path, limits)?;
+    if manifest.format != 2 {
+        return Err(Error::IncompatibleFormat);
+    }
+    let file = controlled_file(path, &manifest.graph_file, limits.max_bytes)?;
+    if file.metadata()?.len() != manifest.graph_bytes {
+        return Err(invalid("integrity"));
+    }
+    let mut reader = BufReader::new(file);
+    binary::streaming::validate(&mut reader, &manifest, limits, workspace_bytes)?;
+    reader.rewind()?;
+    let mut digest = Sha256::new();
+    let mut bytes = [0_u8; 65536];
+    let mut bounded = reader.take(manifest.graph_bytes.saturating_add(1));
+    let mut total = 0_u64;
+    loop {
+        let n = bounded.read(&mut bytes)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        digest.update(&bytes[..n]);
+    }
+    if total != manifest.graph_bytes || format!("{:x}", digest.finalize()) != manifest.graph_sha256
+    {
+        return Err(invalid("integrity"));
     }
     Ok(manifest)
 }
