@@ -32,7 +32,7 @@ v2 坐标保留构图时的原始浮点位；v1 JSON 读取可能有十进制解
 头部之后依次为：
 
 1. **字典 D 字节**：S 条 `u32 字节长度 + UTF-8 字节` 记录，无结尾零字节。字符串按 UTF-8 字节严格递增、去重；空字符串允许，每项至多 4096 字节。字典 ID 为从零开始的记录序号，S 不得超过 2E。D 包含长度字段，须满足 `4S ≤ D ≤ 4100S`。
-2. **节点 16N 字节**：每条 `f64 longitude + f64 latitude`，WGS84 经度在前。保留浮点位模式，不做定点量化；加载时校验有限、合法坐标及纬度绝对值≤85°。当前 Engine 仍要求经纬跨度各≤5°。
+2. **节点 16N 字节**：每条 `f64 longitude + f64 latitude`，WGS84 经度在前。保留浮点位模式，不做定点量化；加载时校验有限、合法坐标及纬度绝对值≤85°。Engine 的 city 档位要求经纬跨度各≤5°，显式 regional 档位为各≤10°。
 3. **方向边 56E 字节**：每条依次为 `u64 from, u64 to, i64 way, u64 distance_mm, u64 duration_ms, u32 name_id, u32 class_id, u64 flags`。flags 仅 bit 0 表示 roundabout，其他位必须为零。from/to 为节点下标，name/class 引用字典；名称至多 4096 字节、类别至多 64 字节；距离及耗时均为正数。
 4. **禁止序列 4R+8T 字节**：每条 `u32 长度 + 长度个 u64 方向边下标`，长度 2～256，各边引用有效且首尾连续，禁止重复序列。
 
@@ -42,8 +42,10 @@ v2 坐标保留构图时的原始浮点位；v1 JSON 读取可能有十进制解
 
 `verify`、默认 `inspect`、`Engine::open`、`nearest` 和 `route` 支持两种格式。完整读取同时校验 payload SHA-256、长度、manifest 身份、计数及 Graph 拓扑；只重算哈希不能绕过语义校验。发布沿用同父目录唯一 staging、完整图预校验、流式写入、sync、落盘摘要/长度复核、manifest 复核和不覆盖发布规则。
 
-v2 是存储编码，不代表按需图访问。默认构建使用内存，可显式使用 `--builder external --format 2` 通过磁盘流水线生成同一格式；它不扩大容量上限。加载时将字典字符串还原为 Graph 的每边字符串，并创建运行时索引；完整图和查询索引均驻内存。字典解码还限制所有方向边展开后的 name/class UTF-8 字节总量，不超过 `min(LoadOptions.max_bytes, 256 MiB)`；超限返回 graph_string_bytes 资源错误，写入时执行同一检查，避免生成当前加载器不能接受的数据集。类别长度在复制字符串前检查。该预算不是进程 RSS 硬限制。
+v2 是存储编码，不代表按需图访问。默认构建使用内存，可显式使用 `--builder external --format 2` 通过磁盘流水线生成同一格式；默认保留 city 容量；可再显式指定 `--graph-capacity regional`。加载时将字典字符串还原为 Graph 的每边字符串，并创建运行时索引；完整图和查询索引均驻内存。字典解码还限制所有方向边展开后的 name/class UTF-8 字节总量，不超过 `min(LoadOptions.max_bytes, 256 MiB)`；超限返回 graph_string_bytes 资源错误，写入时执行同一检查，避免生成当前加载器不能接受的数据集。类别长度在复制字符串前检查。该预算不是进程 RSS 硬限制。
 
-默认 256 MiB payload、100 万节点、200 万方向边和 100 万限制边引用上限不变。调用者可收紧 LoadOptions，二进制解码的节点/边/限制引用实现上限不能通过放宽选项绕过。
+默认 256 MiB payload、100 万节点、200 万方向边和 100 万限制边引用上限不变。regional 档位提供 2 GiB payload、800 万节点、1600 万方向边；限制边引用仍为 100 万。二进制解码最多接受 regional 数量上限，调用者可用 LoadOptions 收紧。CLI 的 build、verify、inspect、nearest、route 必须分别显式选择档位；运行时 Rust API 使用 `Engine::open_with_capacity`。
+
+v2 的 verify 和完整 inspect 使用 64 MiB 工作预算流式校验，不创建查询索引。加载 Graph/Engine 前检查 `LoadOptions.max_resident_bytes`（CLI 查询参数 `--max-load-bytes`，默认 2 GiB）的分配估算，超限返回 estimated_resident_bytes；该估算包含图、字符串展开及索引，不是操作系统 RSS 限制。字典驻内存分配估算另限 256 MiB。大图可能需要显式提高加载预算，实际部署需测量 RSS。
 
 空间/邻接索引没有持久化，当前格式没有缓存恢复或来源认证机制。未来布局变化需新的格式版本或明确协商，当前读取器不会忽略保留标志。消费者使用前应检查 `version.dataset_formats`；只支持 v1 的旧工具应继续接收默认 v1 数据集。
