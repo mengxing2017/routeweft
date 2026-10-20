@@ -1,5 +1,6 @@
 //! Versioned, bounded, immutable routing dataset. No process-global resources.
 mod adjacency;
+mod binary;
 pub use adjacency::Adjacency;
 use routeweft_domain::model::Coordinate;
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,27 @@ pub struct Manifest {
     pub edges: usize,
     pub restrictions: usize,
     pub diagnostics: BTreeMap<String, u64>,
+}
+/// Explicit on-disk encoding; existing write callers continue producing v1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DatasetFormat {
+    #[default]
+    JsonV1,
+    BinaryV2,
+}
+impl DatasetFormat {
+    pub fn version(self) -> u32 {
+        match self {
+            Self::JsonV1 => 1,
+            Self::BinaryV2 => 2,
+        }
+    }
+    fn graph_file(self) -> &'static str {
+        match self {
+            Self::JsonV1 => "graph.json",
+            Self::BinaryV2 => "graph.bin",
+        }
+    }
 }
 #[derive(Clone, Copy)]
 pub struct LoadOptions {
@@ -302,8 +324,8 @@ impl<W: Write> Write for DigestWriter<W> {
 fn identity(m: &Manifest) -> String {
     hash(
         format!(
-            "routeweft-v1\n{}\n{}\n{}\n{}",
-            m.source_sha256, m.profile, m.builder, m.graph_sha256
+            "routeweft-v{}\n{}\n{}\n{}\n{}",
+            m.format, m.source_sha256, m.profile, m.builder, m.graph_sha256
         )
         .as_bytes(),
     )
@@ -317,7 +339,7 @@ pub fn inspect_manifest(path: &Path, limits: LoadOptions) -> Result<Manifest> {
     let manifest: Manifest =
         serde_json::from_slice(&read_controlled(path, "manifest.json", 1024 * 1024)?)
             .map_err(|e| invalid(e.to_string()))?;
-    if manifest.format != 1 {
+    if !matches!(manifest.format, 1 | 2) {
         return Err(Error::IncompatibleFormat);
     }
     if manifest.source_sha256.len() != 64
@@ -328,7 +350,12 @@ pub fn inspect_manifest(path: &Path, limits: LoadOptions) -> Result<Manifest> {
     {
         return Err(invalid("source hash"));
     }
-    if manifest.graph_file != "graph.json" || manifest.profile != "driving-v1" {
+    let graph_file = if manifest.format == 1 {
+        "graph.json"
+    } else {
+        "graph.bin"
+    };
+    if manifest.graph_file != graph_file || manifest.profile != "driving-v1" {
         return Err(invalid("manifest contract"));
     }
     for (resource, observed, limit) in [
@@ -363,9 +390,13 @@ pub fn inspect_manifest(path: &Path, limits: LoadOptions) -> Result<Manifest> {
 }
 pub fn open(path: &Path, limits: LoadOptions) -> Result<(Manifest, Graph)> {
     let manifest = inspect_manifest(path, limits)?;
-    let file = controlled_file(path, "graph.json", limits.max_bytes)?;
+    let file = controlled_file(path, &manifest.graph_file, limits.max_bytes)?;
     let mut reader = BufReader::new(DigestReader::new(file, limits.max_bytes));
-    let parsed = serde_json::from_reader::<_, Graph>(&mut reader);
+    let parsed = if manifest.format == 1 {
+        serde_json::from_reader::<_, Graph>(&mut reader).map_err(json_stream_error)
+    } else {
+        binary::read(&mut reader, &manifest, limits)
+    };
     if let Some(observed) = reader.get_ref().exceeded {
         return Err(resource_limit(
             "graph_bytes",
@@ -374,7 +405,7 @@ pub fn open(path: &Path, limits: LoadOptions) -> Result<(Manifest, Graph)> {
             "dataset_read",
         ));
     }
-    let graph = parsed.map_err(json_stream_error)?;
+    let graph = parsed?;
     let (bytes, digest) = reader.into_inner().finish();
     if bytes != manifest.graph_bytes
         || digest != manifest.graph_sha256
@@ -400,6 +431,24 @@ pub fn write(
     snapshot: Option<i64>,
     diagnostics: BTreeMap<String, u64>,
 ) -> Result<Manifest> {
+    write_with_format(
+        path,
+        graph,
+        source_sha256,
+        snapshot,
+        diagnostics,
+        DatasetFormat::JsonV1,
+    )
+}
+/// Same immutable publication and resource contracts as write, with explicit format.
+pub fn write_with_format(
+    path: &Path,
+    graph: &Graph,
+    source_sha256: String,
+    snapshot: Option<i64>,
+    diagnostics: BTreeMap<String, u64>,
+    format: DatasetFormat,
+) -> Result<Manifest> {
     graph.validate(LoadOptions::default())?;
     if path.exists() {
         return Err(invalid("output already exists"));
@@ -419,7 +468,7 @@ pub fn write(
         let graph_file = OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(stage.join("graph.json"))?;
+            .open(stage.join(format.graph_file()))?;
         let mut writer = BufWriter::new(DigestWriter {
             inner: graph_file,
             digest: Sha256::new(),
@@ -427,7 +476,12 @@ pub fn write(
             limit: LoadOptions::default().max_bytes,
             exceeded: None,
         });
-        let serialized = serde_json::to_writer(&mut writer, graph);
+        let serialized = match format {
+            DatasetFormat::JsonV1 => {
+                serde_json::to_writer(&mut writer, graph).map_err(json_stream_error)
+            }
+            DatasetFormat::BinaryV2 => binary::write(&mut writer, graph, LoadOptions::default()),
+        };
         let flushed = writer.flush();
         if let Some(observed) = writer.get_ref().exceeded {
             return Err(resource_limit(
@@ -437,14 +491,14 @@ pub fn write(
                 "dataset_write",
             ));
         }
-        serialized.map_err(json_stream_error)?;
+        serialized?;
         flushed?;
         writer.get_ref().inner.sync_all()?;
         let writer = writer.into_inner().map_err(|e| Error::Io(e.into_error()))?;
         let graph_bytes = writer.bytes;
         let graph_sha256 = format!("{:x}", writer.digest.finalize());
         let mut m = Manifest {
-            format: 1,
+            format: format.version(),
             dataset_id: String::new(),
             builder: env!("CARGO_PKG_VERSION").into(),
             profile: "driving-v1".into(),
@@ -453,7 +507,7 @@ pub fn write(
             attribution:
                 "© OpenStreetMap contributors; ODbL 1.0; https://www.openstreetmap.org/copyright"
                     .into(),
-            graph_file: "graph.json".into(),
+            graph_file: format.graph_file().into(),
             graph_sha256,
             graph_bytes,
             nodes: graph.nodes.len(),
@@ -470,8 +524,8 @@ pub fn write(
         file.sync_all()?;
         // Graph was validated before serialization. Recheck persisted bytes without
         // allocating a second Graph while the caller's Graph is still alive.
-        if hash_file(&stage.join("graph.json"))? != m.graph_sha256
-            || fs::metadata(stage.join("graph.json"))?.len() != m.graph_bytes
+        if hash_file(&stage.join(format.graph_file()))? != m.graph_sha256
+            || fs::metadata(stage.join(format.graph_file()))?.len() != m.graph_bytes
         {
             return Err(invalid("persisted graph integrity"));
         }
