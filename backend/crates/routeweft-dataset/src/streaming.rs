@@ -31,7 +31,7 @@ pub(crate) fn validate(
     let count = u64_read(reader)?;
     let refs = u64_read(reader)?;
     let dictionary_bytes = u64_read(reader)?;
-    let defaults = LoadOptions::default();
+    let defaults = crate::GraphCapacity::Regional.limits();
     for (name, value, limit) in [
         (
             "graph_nodes",

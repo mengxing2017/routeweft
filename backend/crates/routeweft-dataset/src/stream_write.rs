@@ -9,7 +9,7 @@ pub(crate) fn write(
     metadata: &BinaryMetadata,
     options: BinaryWriteOptions,
 ) -> Result<()> {
-    let limits = LoadOptions::default();
+    let limits = options.graph_capacity.limits();
     let mut dictionary = BTreeMap::<String, usize>::new();
     let mut charged = 0_u64;
     let mut expanded = 0_u64;

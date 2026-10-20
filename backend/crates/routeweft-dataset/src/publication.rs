@@ -24,6 +24,7 @@ pub struct BinaryMetadata {
 /// Logical writer/validator allowances, not process RSS guarantees.
 #[derive(Clone, Copy)]
 pub struct BinaryWriteOptions {
+    pub graph_capacity: GraphCapacity,
     /// Owned dictionary entries, conservatively charged before insertion.
     pub dictionary_bytes: u64,
     /// Workspace passed to the independent persisted v2 validator.
@@ -34,6 +35,7 @@ pub struct BinaryWriteOptions {
 impl Default for BinaryWriteOptions {
     fn default() -> Self {
         Self {
+            graph_capacity: GraphCapacity::City,
             dictionary_bytes: 64 * 1024 * 1024,
             validation_bytes: 64 * 1024 * 1024,
             output_bytes: 257 * 1024 * 1024,
@@ -62,7 +64,7 @@ pub fn write_binary_streaming(
     if fs::symlink_metadata(path).is_ok() {
         return Err(invalid("output already exists"));
     }
-    let limits = LoadOptions::default();
+    let limits = options.graph_capacity.limits();
     for (resource, observed, limit) in [
         ("graph_nodes", metadata.nodes, limits.max_nodes),
         ("graph_edges", metadata.edges, limits.max_edges),

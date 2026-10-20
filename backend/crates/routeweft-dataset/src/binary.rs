@@ -163,12 +163,16 @@ pub(super) fn read(
     bound(
         "graph_nodes",
         nodes,
-        limits.max_nodes.min(LoadOptions::default().max_nodes) as u64,
+        limits
+            .max_nodes
+            .min(super::GraphCapacity::Regional.limits().max_nodes) as u64,
     )?;
     bound(
         "graph_edges",
         edges,
-        limits.max_edges.min(LoadOptions::default().max_edges) as u64,
+        limits
+            .max_edges
+            .min(super::GraphCapacity::Regional.limits().max_edges) as u64,
     )?;
     bound(
         "restriction_edges",
@@ -201,6 +205,11 @@ pub(super) fn read(
         if length > 4096 || used > dictionary_bytes {
             return Err(invalid("v2 string length"));
         }
+        bound(
+            "dictionary_heap_bytes",
+            used + (strings.len() as u64 + 1) * 64,
+            MAX_STRING_BYTES,
+        )?;
         let mut bytes = vec![0; length];
         reader.read_exact(&mut bytes).map_err(|error| {
             if error.kind() == std::io::ErrorKind::UnexpectedEof {

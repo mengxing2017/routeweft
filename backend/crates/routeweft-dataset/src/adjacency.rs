@@ -12,7 +12,9 @@ pub struct Adjacency {
 impl Adjacency {
     /// Checks source indices and default graph capacity, not full graph semantics.
     pub fn new(node_count: usize, edges: &[Edge]) -> Result<Self> {
-        let limits = LoadOptions::default();
+        Self::with_limits(node_count, edges, LoadOptions::default())
+    }
+    pub fn with_limits(node_count: usize, edges: &[Edge], limits: LoadOptions) -> Result<Self> {
         for (resource, observed, limit) in [
             ("graph_nodes", node_count, limits.max_nodes),
             ("graph_edges", edges.len(), limits.max_edges),

@@ -124,12 +124,41 @@ impl DatasetFormat {
         }
     }
 }
-#[derive(Clone, Copy)]
+/// Explicit graph capacity, independent of PBF decode and resident memory budgets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphCapacity {
+    #[default]
+    City,
+    Regional,
+}
+impl GraphCapacity {
+    pub fn limits(self) -> LoadOptions {
+        match self {
+            Self::City => LoadOptions::default(),
+            Self::Regional => LoadOptions {
+                max_bytes: 2 * 1024 * 1024 * 1024,
+                max_nodes: 8_000_000,
+                max_edges: 16_000_000,
+                ..Default::default()
+            },
+        }
+    }
+    pub fn max_span_degrees(self) -> f64 {
+        match self {
+            Self::City => 5.,
+            Self::Regional => 10.,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
 pub struct LoadOptions {
     pub max_bytes: u64,
     pub max_nodes: usize,
     pub max_edges: usize,
     pub max_restriction_edges: usize,
+    /// Conservative logical allocation estimate; not a process RSS guarantee.
+    pub max_resident_bytes: u64,
 }
 impl Default for LoadOptions {
     fn default() -> Self {
@@ -138,8 +167,69 @@ impl Default for LoadOptions {
             max_nodes: 1_000_000,
             max_edges: 2_000_000,
             max_restriction_edges: 1_000_000,
+            max_resident_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
+}
+/// Reject excessive resident allocations before decoding the payload. Count
+/// arithmetic is checked; include spare vector capacity, strings/dictionary,
+/// allocator overhead and (optionally) CSR, R-tree construction and turn trie.
+pub fn check_resident_budget(m: &Manifest, limits: LoadOptions, indexes: bool) -> Result<u64> {
+    // The v1 serde visitors enforce legacy ceilings before manifest counts can
+    // be checked. Reserve that worst case against forged count declarations.
+    let legacy = LoadOptions::default();
+    let nodes = if m.format == 1 {
+        legacy.max_nodes
+    } else {
+        m.nodes
+    };
+    let edges = if m.format == 1 {
+        legacy.max_edges
+    } else {
+        m.edges
+    };
+    let refs = if m.format == 1 {
+        legacy.max_restriction_edges as u64
+    } else {
+        (m.restrictions as u64)
+            .saturating_mul(256)
+            .min(limits.max_restriction_edges as u64)
+    };
+    let strings = (edges as u64).saturating_mul(4160).min(256 * 1024 * 1024);
+    // Up to two dictionary entries per edge, including unused 4096-byte
+    // entries; class length only constrains strings actually used as classes.
+    let dictionary = (edges as u64)
+        .saturating_mul(2 * (4096 + 4 + 64))
+        .min(256 * 1024 * 1024);
+    let estimated = (nodes as u64)
+        .checked_mul(if indexes { 48 } else { 32 })
+        .and_then(|n| {
+            (edges as u64)
+                .checked_mul(if indexes { 512 } else { 256 })
+                .and_then(|e| n.checked_add(e))
+        })
+        .and_then(|n| {
+            refs.checked_mul(if indexes { 320 } else { 64 })
+                .and_then(|r| n.checked_add(r))
+        })
+        .and_then(|n| {
+            n.checked_add(strings)
+                .and_then(|n| n.checked_add(dictionary))
+        })
+        .ok_or(Error::LimitExceeded)?;
+    if estimated > limits.max_resident_bytes {
+        return Err(resource_limit(
+            "estimated_resident_bytes",
+            limits.max_resident_bytes,
+            estimated,
+            if indexes {
+                "engine_load"
+            } else {
+                "dataset_load"
+            },
+        ));
+    }
+    Ok(estimated)
 }
 pub fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -430,7 +520,11 @@ pub fn validate_binary_streaming(
 }
 pub fn open(path: &Path, limits: LoadOptions) -> Result<(Manifest, Graph)> {
     let manifest = inspect_manifest(path, limits)?;
+    check_resident_budget(&manifest, limits, false)?;
     let file = controlled_file(path, &manifest.graph_file, limits.max_bytes)?;
+    if file.metadata()?.len() != manifest.graph_bytes {
+        return Err(invalid("integrity"));
+    }
     let mut reader = BufReader::new(DigestReader::new(file, limits.max_bytes));
     let parsed = if manifest.format == 1 {
         serde_json::from_reader::<_, Graph>(&mut reader).map_err(json_stream_error)
