@@ -43,7 +43,37 @@ routeweft build --input city.osm.pbf --profile driving --output city-external/ \
 
 可选 `--build-timeout-ms` 设置协作式截止时间，0 表示立即截止；只在阶段边界和最终提交前检查，不中断正在运行的阶段，因此不能作为硬超时。上述 scratch/构建时限参数只用于 external，内存模式使用它们会被拒绝。强制终止或断电可能留下私有工作目录或目标预占空目录；当前无自动恢复。最终 rename 后的目录 sync 错误可能返回失败但留下完整目标，重试前应检查已有目标。
 
-external 仍执行既有 PBF/解压/对象/图上限。字典和限制聚合有内存预算，加载与查询仍驻内存；该模式不构成省域或 3 GiB 输入支持声明。
+external 使用独立的累计解码工作量预算；单块、输入及图上限继续适用。字典和限制聚合有内存预算，加载与查询仍驻内存；该模式不构成省域或 3 GiB 输入支持声明。
+
+### 显式大图容量档位
+
+`--graph-capacity city|regional` 适用于 build、inspect、verify、nearest、route，默认 `city`。`regional` 构建必须使用 external/v2；full/structure 预检仍使用原内存容量。该档位扩展图处理额度，不扩大 PBF 输入上限或解码工作量预算，也不保证任意省域都能构建成功。
+
+| 资源 | city | regional |
+| --- | ---: | ---: |
+| 图节点 | 1,000,000 | 8,000,000 |
+| 有向边 | 2,000,000 | 16,000,000 |
+| 图文件 | 256 MiB | 2 GiB |
+| 单轴经纬跨度 | 5 度 | 10 度 |
+
+图容量从外存关联、方向边、邻接、限制处理传递到最终 v2 写入及校验；各阶段核对档位身份。scratch 仍是独立的全链路额度，默认 1 GiB 不适用于所有大图。`version.capabilities.graph_capacity_profiles` 声明各档位。v2 字节格式保持不变，旧工具可能因自身容量限制拒绝大图。regional 产物的 manifest diagnostics 包含 `graph_capacity_regional=1`。
+
+```bash
+routeweft build --input region.osm.pbf --profile driving --builder external \
+  --format 2 --graph-capacity regional --output region/ --scratch-dir scratch/ \
+  --max-scratch-bytes 17179869184 --invalid-maxspeed use_default
+routeweft verify --dataset region/ --graph-capacity regional
+routeweft nearest --dataset region/ --graph-capacity regional \
+  --max-load-bytes 8589934592 --coordinate 108.32,22.82
+```
+
+inspect full / verify 对 v2 使用流式完整语义及摘要校验，校验工作区额度 64 MiB，不加载完整 Graph。v1 保持原读取路径。
+
+nearest / route 接受 `--max-load-bytes`，默认 2 GiB。加载前依据 manifest 估算 Graph、字符串/字典、CSR、R-tree 构建和限制自动机的分配量；不足时返回 `estimated_resident_bytes`、stage=`engine_load`，在打开图载荷和创建索引之前拒绝。库 `LoadOptions.max_resident_bytes` 同时限制图解码估算；regional Engine 使用 `Engine::open_with_capacity`。v1 没有可信的记录数头部，估算保守采用原 serde 数量上限，以防伪造较小 manifest 数量绕过预算。
+
+该估算包含容量冗余和分配开销，**不是进程 RSS 或系统内存硬上限**；不含页缓存及独立查询状态，宿主仍应配置进程资源限制。查询 `--max-work/--max-states/--max-queue/--timeout-ms` 独立生效，增大图容量不会自动提高搜索预算。完整图及运行时索引仍驻内存，尚未提供按需图加载。
+
+regional 吸附按查询点纬度做局部平面投影，空间索引继续采用共同坐标系及保守候选范围；距离仍采用球面计算。纬度范围仍为 [-85,85]，不支持跨日期变更线的数据集。city 沿用原投影，避免改变既有查询结果。
 
 查询选项：`--radius-m` 默认 1000，`--max-work` 默认 2,000,000，`--max-states` 默认 250,000，`--max-queue` 默认 500,000，`--timeout-ms` 默认 10,000。deadline 从数据集加载完成后开始，限制实际查询计算，不包括进程启动/加载；宿主如需请求总时限，应在库外统筹。
 
@@ -81,13 +111,13 @@ routeweft inspect --dataset dataset/ --mode metadata --json
 
 structure 使用相同的单块解码器，但不保留全局 node/way/relation 集合，不建图、不检查重复 ID、引用闭包或驾驶/限制规则。成功报告明确 `validation_scope=structure_only`、`semantic_validation=false`、`duplicate_ids_checked=false`，包含源哈希、对象数、累计解压字节及完整解码预计保留的对象字节数。后者不是扫描进程的 RSS。它仍执行当前构建器的容量门槛；超限提前失败时不代表已经扫描完全部输入。该模式拒绝 `--invalid-restrictions`，不能把结构通过当作完整预检通过。
 
-metadata 仅检查 manifest 结构、声明容量及内容身份，不打开图文件（graph.json 或 graph.bin），返回 `verified=false`、`verification_scope=manifest_only`。默认 inspect 与 verify 仍加载图并校验完整性和拓扑。元信息读取不能代替交付校验，也不认证来源。
+metadata 仅检查 manifest 结构、声明容量及内容身份，不打开图文件（graph.json 或 graph.bin），返回 `verified=false`、`verification_scope=manifest_only`。默认 inspect 与 verify 校验完整性和拓扑；v2 使用流式校验，v1 加载完整图。元信息读取不能代替交付校验，也不认证来源。
 
 build 本身执行完整语义检查并返回审计 report；若不需要提前排查，可直接构建并验证报告，避免先完整 preflight 再重复建图。当前没有阶段缓存或恢复功能。输入容量见下节，数据集限制见 [数据集格式](dataset-format.md)。
 
 ### 输入容量与资源边界
 
-默认构建器使用全内存对象与图；显式 external 使用磁盘流水线。两种模式的输入均须同时满足以下限制，压缩文件较小也可能因对象或解码规模超限而被拒绝：
+默认构建器使用全内存对象与图；显式 external 使用磁盘流水线。内存构建与 full/structure 预检的输入均须同时满足以下限制，压缩文件较小也可能因对象或解码规模超限而被拒绝：
 
 | 资源 | 上限 | 含义 |
 | --- | ---: | --- |
@@ -96,6 +126,8 @@ build 本身执行完整语义检查并返回审计 report；若不需要提前�
 | decoded_bytes | 512 MiB | 累计解压处理量 |
 | estimated_osm_bytes | 512 MiB | 完整 OSM 对象保留估算 |
 | osm_objects | 2,000,000 | node、way、relation 合计 |
+
+external 解码仍限制输入 512 MiB、单块 32 MiB；累计对象上限为 100,000,000，累计解压为 16 GiB，完整对象累计估算工作量为 64 GiB（`osm_work_bytes`）。这些计数不代表保留内存；对象逐条交给磁盘暂存，批次、单条记录、scratch、关联和限制聚合各有独立预算。`version.capabilities.external_decode_limits` 声明这些工作量上限；原 `limits` 继续描述默认内存/city 模式。full/structure 预检仍按内存容量拒绝超限输入，不能用来判断 external 是否可构建。实际 external build 执行语义检查；图及加载使用上述显式容量和内存预算，3 GiB 输入仍不支持。
 
 上述限制是独立容量门槛，不是进程 RSS 保证；对象估算不包含全部临时缓冲、图和查询索引。数据集还受 [图文件和对象数量限制](dataset-format.md) 约束。CLI 不提供调高上述输入限制的参数；external 提供 scratch 预算，但不提供阶段缓存、恢复或 RSS 硬预算参数。宿主应根据实际资源设置进程级资源限制。
 
@@ -108,6 +140,28 @@ build 本身执行完整语义检查并返回审计 report；若不需要提前�
 ```
 
 按 resource/stage 分型，不解析 message。主要阶段为 input、pbf_read、pbf_decode、graph_build、graph_validation、dataset_manifest、dataset_read、dataset_write；external 还会返回 external_build、external_join、external_edges、external_adjacency、external_restrictions、external_blockways、v2_validation 等阶段。自动扣除保留文件后，子阶段 resource.limit 可能小于 CLI 总预算。estimated_osm_bytes 是对象估算，decoded_bytes 是累计处理工作量，均不是进程内存硬限制。resource 为可选字段；部分容量或解析错误仅返回 kind/message，调用方应处理字段缺失。
+
+## 无效限速值的显式回退
+
+build 和 full preflight 接受 `--invalid-maxspeed reject|use_default`，默认 `reject`。内存和 external 构建使用相同策略；structure 预检不解释 profile，显式传入此参数会被拒绝。`version.invalid_maxspeed_policies` 声明支持的选项。
+
+`reject` 对无法解析的文本、非有限数、非正数或大于 300 km/h 的值返回退出码 4、`details.failure_code=InvalidMaxspeed`。`use_default` 显式允许对这些无效值估算行驶成本：通用 `maxspeed` 回退到道路类别默认速度；`maxspeed:forward/backward` 回退到已解析的通用速度。有效限速仍取它与回退上限的较低值，mph 单位换算继续生效。缺失或空白值沿用既有默认行为，不计入回退。条件、通行权限、物理尺寸和转向限制仍按 driving-v1 处理。
+
+```bash
+routeweft build --input region.osm.pbf --profile driving --builder external \
+  --format 2 --output region/ --scratch-dir scratch/ \
+  --max-scratch-bytes 8589934592 --invalid-maxspeed use_default --json
+```
+
+该选项会改变含无效限速道路的预计耗时，可能影响路线选择；默认速度是成本估计，不能当作已核实的法定限速。不会因为限速回退删除道路。成功或失败报告包含 `maxspeed_policy` 和 `maxspeed_diagnostics`，例如：
+
+```json
+{"way_id":1533487270,"field":"maxspeed","value":"辅路","action":"use_default","effective_kmh":50.0}
+```
+
+实际回退速度按道路类别及方向计算。严格失败时 action 为 `rejected`、effective_kmh 为 null。诊断保留完整原值，最多 256 条且累计字段/值字节加每条 128 字节计费不超过 64 KiB；超限返回 `maxspeed_audit_entries` 或 `maxspeed_audit_bytes`（stage=`profile`），不会丢弃警告后继续。审计描述最终构图尝试中采用或拒绝的值，限制关系重试排除的道路不再出现在最终限速审计中。
+
+成功数据集 manifest 的 diagnostics 保存 `maxspeed_policy_use_default=1`（显式启用时）及 `maxspeed_fallback_values`（发生回退时），逐道路审计位于 build/preflight 报告中，调用者应保留报告。此策略独立于 `--invalid-restrictions`；处理未知限速不表示允许无效转向关系。
 
 ## 限制关系诊断与显式保守模式
 
