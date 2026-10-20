@@ -1,6 +1,11 @@
-//! Bounded, sorted driving-record staging. This is not a routing dataset builder.
+//! Bounded external driving pipeline: record staging, graph preparation and v2 build.
 //! Budgets cover serialized batches and scratch files, not total process RSS.
+mod build;
 mod connection;
+pub use build::{
+    build_external, ExternalBuildControl, ExternalBuildOptions, ExternalBuildResources,
+    ExternalBuildResult,
+};
 pub use connection::{
     connect, emit_edges, index_adjacency, prepare_block_ways, publish_block_ways,
     resolve_restrictions, AccessBudget, AdjacencyReport, BlockWaysOptions, BlockWaysReport,
