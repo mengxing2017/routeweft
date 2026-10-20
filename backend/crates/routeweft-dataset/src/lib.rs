@@ -1,4 +1,6 @@
 //! Versioned, bounded, immutable routing dataset. No process-global resources.
+mod adjacency;
+pub use adjacency::Adjacency;
 use routeweft_domain::model::Coordinate;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
