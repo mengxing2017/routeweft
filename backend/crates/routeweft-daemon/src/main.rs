@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -86,7 +86,13 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         return Err(bad("unknown command"));
     }
     let allowed: &[&str] = match command.as_str() {
-        "build" => &["--input", "--profile", "--output", "--invalid-restrictions"],
+        "build" => &[
+            "--input",
+            "--profile",
+            "--output",
+            "--invalid-restrictions",
+            "--format",
+        ],
         "preflight" => &["--input", "--profile", "--invalid-restrictions", "--mode"],
         "version" => &[],
         "inspect" => &["--dataset", "--mode"],
@@ -144,7 +150,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     if command == "version" {
         return Ok(
             json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
-            "cli_schema":1,"dataset_formats":[1],"profiles":["driving-v1"],
+            "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
             "commands":["build","preflight","inspect","verify","nearest","route","version"],
             "invalid_restriction_policies":["reject","block_ways"],
             "capabilities": {
@@ -153,12 +159,12 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 "preflight":"full_semantic_build", "preflight_cache":false,
                 "preflight_modes":["full","structure"],
                 "inspect_modes":["full","metadata"],
-                "graph_io":"streaming_json", "build_revalidates_input":true,
+                "graph_io":"streaming_json_or_binary_v2", "dataset_write_formats":[1,2], "build_revalidates_input":true,
                 "limits": {"input_bytes":536870912,"decoded_bytes":536870912,
                     "estimated_osm_bytes":536870912,"osm_objects":2000000,
                     "blob_bytes":33554432,"graph_bytes":268435456,
                     "graph_nodes":1000000,"graph_edges":2000000,
-                    "restriction_edges":1000000},
+                    "restriction_edges":1000000,"v2_graph_string_bytes":268435456},
                 "memory_limit_kind":"estimated_objects_not_rss"
             }}),
         );
@@ -200,10 +206,16 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             let report = routeweft_preprocess::preflight(input, options).map_err(build_error)?;
             return Ok(json!({"schema":1,"status":"ok","report":report}));
         }
-        let (m, report) = routeweft_preprocess::build_with_options(
+        let format = match flags.get("--format").copied().unwrap_or("1") {
+            "1" => routeweft_dataset::DatasetFormat::JsonV1,
+            "2" => routeweft_dataset::DatasetFormat::BinaryV2,
+            _ => return Err(bad("invalid dataset format; use 1 or 2")),
+        };
+        let (m, report) = routeweft_preprocess::build_with_format(
             input,
             Path::new(required("--output")?),
             options,
+            format,
         )
         .map_err(build_error)?;
         return Ok(json!({"schema":1,"status":"ok","manifest":m,"report":report}));

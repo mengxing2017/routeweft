@@ -559,16 +559,31 @@ pub fn build_with_options(
     output: &Path,
     options: BuildOptions,
 ) -> Result<(Manifest, InputReport)> {
+    build_with_format(
+        input_path,
+        output,
+        options,
+        routeweft_dataset::DatasetFormat::JsonV1,
+    )
+}
+/// Build using an explicit storage format. The driving profile is unchanged.
+pub fn build_with_format(
+    input_path: &Path,
+    output: &Path,
+    options: BuildOptions,
+    format: routeweft_dataset::DatasetFormat,
+) -> Result<(Manifest, InputReport)> {
     if input_path == output {
         return Err(invalid("input and output must differ"));
     }
     let (graph, report) = input(input_path, options)?;
-    let manifest = routeweft_dataset::write(
+    let manifest = routeweft_dataset::write_with_format(
         output,
         &graph,
         report.source_sha256.clone(),
         report.source_snapshot,
         report.diagnostics.clone(),
+        format,
     )
     .map_err(|source| {
         let mut failed_report = report.clone();
