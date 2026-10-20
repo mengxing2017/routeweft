@@ -1,9 +1,9 @@
 use crate::pbf::Relation;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Explicit opt-in: never infer a missing turn location or ignore a restriction.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvalidRestrictionPolicy {
     #[default]
@@ -14,13 +14,13 @@ pub enum InvalidRestrictionPolicy {
 pub struct BuildOptions {
     pub invalid_restrictions: InvalidRestrictionPolicy,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberDiagnostic {
     pub kind: String,
     pub id: i64,
     pub role: String,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RestrictionDiagnostic {
     pub relation_id: i64,
     /// Stable machine-readable category, independent of the human message.

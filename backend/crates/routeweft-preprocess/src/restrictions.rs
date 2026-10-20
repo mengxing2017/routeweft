@@ -8,7 +8,7 @@ use crate::{
 use routeweft_dataset::Edge;
 use std::collections::BTreeMap;
 
-type Resolved = Option<(String, Vec<Vec<usize>>)>;
+pub(crate) type Resolved = Option<(String, Vec<Vec<usize>>)>;
 pub(crate) fn applies(rel: &Relation) -> bool {
     value(&rel.tags, "type") == "restriction"
         && !value(&rel.tags, "except")
@@ -33,7 +33,80 @@ pub(crate) fn conditional(rel: &Relation) -> bool {
     .iter()
     .any(|k| rel.tags.contains_key(*k))
 }
-#[allow(clippy::too_many_arguments)]
+/// Minimal fallible graph access shared by memory and disk restriction resolution.
+pub(crate) trait Access {
+    fn has_way(&mut self, way: i64) -> crate::Result<bool>;
+    fn way_edge(&mut self, way: i64, at: usize) -> crate::Result<Option<usize>>;
+    fn edge(&mut self, id: usize) -> crate::Result<TurnEdge>;
+    fn outgoing(&mut self, node: usize, at: usize) -> crate::Result<Option<usize>>;
+    fn node(&mut self, id: i64) -> crate::Result<Option<usize>>;
+    fn reference_state(&mut self, kind: u64, id: i64) -> crate::Result<u8>;
+}
+#[derive(Clone, Copy)]
+pub(crate) struct TurnEdge {
+    pub from: usize,
+    pub to: usize,
+    pub way: i64,
+}
+impl From<&Edge> for TurnEdge {
+    fn from(edge: &Edge) -> Self {
+        Self {
+            from: edge.from,
+            to: edge.to,
+            way: edge.way,
+        }
+    }
+}
+pub(crate) enum ResolveError {
+    Diagnostic(Box<RestrictionDiagnostic>),
+    Access(crate::Error),
+}
+impl From<crate::Error> for ResolveError {
+    fn from(error: crate::Error) -> Self {
+        Self::Access(error)
+    }
+}
+struct MemoryAccess<'a> {
+    osm: &'a Osm,
+    mapping: &'a [i64],
+    by_way: &'a BTreeMap<i64, Vec<usize>>,
+    edges: &'a [Edge],
+    outgoing: &'a routeweft_dataset::Adjacency,
+}
+impl Access for MemoryAccess<'_> {
+    fn has_way(&mut self, id: i64) -> crate::Result<bool> {
+        Ok(self.by_way.contains_key(&id))
+    }
+    fn way_edge(&mut self, id: i64, at: usize) -> crate::Result<Option<usize>> {
+        Ok(self.by_way.get(&id).and_then(|ids| ids.get(at)).copied())
+    }
+    fn edge(&mut self, id: usize) -> crate::Result<TurnEdge> {
+        Ok((&self.edges[id]).into())
+    }
+    fn outgoing(&mut self, node: usize, at: usize) -> crate::Result<Option<usize>> {
+        Ok(self.outgoing[node].get(at).copied())
+    }
+    fn node(&mut self, id: i64) -> crate::Result<Option<usize>> {
+        Ok(self.mapping.binary_search(&id).ok())
+    }
+    fn reference_state(&mut self, kind: u64, id: i64) -> crate::Result<u8> {
+        Ok(if kind == 0 {
+            if self.osm.nodes.contains_key(&id) {
+                2
+            } else {
+                0
+            }
+        } else {
+            self.osm.ways.get(&id).map_or(0, |way| {
+                if way.refs.iter().all(|id| self.osm.nodes.contains_key(id)) {
+                    2
+                } else {
+                    1
+                }
+            })
+        })
+    }
+}
 pub(crate) fn resolve(
     rel: &Relation,
     osm: &Osm,
@@ -42,17 +115,39 @@ pub(crate) fn resolve(
     edges: &[Edge],
     outgoing: &routeweft_dataset::Adjacency,
 ) -> std::result::Result<Resolved, Box<RestrictionDiagnostic>> {
-    let fail = |code, message: &str| Box::new(RestrictionDiagnostic::new(rel, code, message));
+    let mut access = MemoryAccess {
+        osm,
+        mapping,
+        by_way,
+        edges,
+        outgoing,
+    };
+    match resolve_with(rel, &mut access) {
+        Ok(value) => Ok(value),
+        Err(ResolveError::Diagnostic(diagnostic)) => Err(diagnostic),
+        Err(ResolveError::Access(_)) => unreachable!("memory restriction access is infallible"),
+    }
+}
+pub(crate) fn resolve_with(
+    rel: &Relation,
+    access: &mut impl Access,
+) -> std::result::Result<Resolved, ResolveError> {
+    let fail = |code, message: &str| {
+        ResolveError::Diagnostic(Box::new(RestrictionDiagnostic::new(rel, code, message)))
+    };
     let from: Vec<_> = rel.members.iter().filter(|m| m.role == "from").collect();
     let to: Vec<_> = rel.members.iter().filter(|m| m.role == "to").collect();
     let via: Vec<_> = rel.members.iter().filter(|m| m.role == "via").collect();
     // Relations with no retained roads cannot affect this driving graph. Do not
     // confuse an empty from/to list with proof that the relation is irrelevant.
-    if !rel
-        .members
-        .iter()
-        .any(|m| m.kind == 1 && by_way.contains_key(&m.id))
-    {
+    let mut relevant = false;
+    for member in &rel.members {
+        if member.kind == 1 && access.has_way(member.id)? {
+            relevant = true;
+            break;
+        }
+    }
+    if !relevant {
         return Ok(None);
     }
     let rule = [
@@ -122,38 +217,33 @@ pub(crate) fn resolve(
         ));
     }
     for m in from.iter().chain(&to).chain(&via) {
-        if !(if m.kind == 0 {
-            osm.nodes.contains_key(&m.id)
-        } else {
-            osm.ways.contains_key(&m.id)
-        }) {
-            return Err(fail(
-                "MissingReference",
-                "restriction references an absent node or way; check extract closure",
-            ));
-        }
-        if m.kind == 1
-            && osm.ways[&m.id]
-                .refs
-                .iter()
-                .any(|id| !osm.nodes.contains_key(id))
-        {
-            return Err(fail(
-                "MissingReference",
-                "restriction way references absent nodes; check extract closure",
-            ));
+        match access.reference_state(m.kind, m.id)? {
+            0 => {
+                return Err(fail(
+                    "MissingReference",
+                    "restriction references an absent node or way; check extract closure",
+                ))
+            }
+            1 => {
+                return Err(fail(
+                    "MissingReference",
+                    "restriction way references absent nodes; check extract closure",
+                ))
+            }
+            _ => (),
         }
     }
+
     // A way may legitimately be excluded by the conservative profile. Resolve
     // every remaining from/to combination, but never discard an unresolved one.
     let mut sequences = Vec::new();
     let mut work = 0;
     for f in &from {
         for t in &to {
-            if !by_way.contains_key(&f.id) {
+            if !access.has_way(f.id)? {
                 continue;
             }
-            if !by_way.contains_key(&t.id) {
+            if !access.has_way(t.id)? {
                 if rule.starts_with("only_") {
                     return Err(fail(
                         "UnresolvedRestriction",
@@ -164,13 +254,15 @@ pub(crate) fn resolve(
             }
             let before = sequences.len();
             if node_via {
-                let Ok(node) = mapping.binary_search(&via[0].id) else {
+                let Some(node) = access.node(via[0].id)? else {
                     return Err(fail(
                         "UnresolvedRestriction",
                         "via-node has no retained road connection",
                     ));
                 };
-                for &a in &by_way[&f.id] {
+                let mut from_at = 0;
+                while let Some(a) = access.way_edge(f.id, from_at)? {
+                    from_at += 1;
                     work += 1;
                     if work > 100_000 {
                         return Err(fail(
@@ -178,10 +270,13 @@ pub(crate) fn resolve(
                             "restriction search budget exceeded",
                         ));
                     }
-                    if edges[a].to != node {
+                    let before_edge = access.edge(a)?;
+                    if before_edge.to != node {
                         continue;
                     }
-                    for &b in &outgoing[node] {
+                    let mut next_at = 0;
+                    while let Some(b) = access.outgoing(node, next_at)? {
+                        next_at += 1;
                         work += 1;
                         if work > 100_000 {
                             return Err(fail(
@@ -189,11 +284,12 @@ pub(crate) fn resolve(
                                 "restriction search budget exceeded",
                             ));
                         }
-                        if edges[b].way != t.id {
+                        let after_edge = access.edge(b)?;
+                        if after_edge.way != t.id {
                             continue;
                         }
                         if f.id == t.id
-                            && rule.ends_with("u_turn") != (edges[b].to == edges[a].from)
+                            && rule.ends_with("u_turn") != (after_edge.to == before_edge.from)
                         {
                             continue;
                         }
@@ -219,10 +315,11 @@ pub(crate) fn resolve(
                         "adjacent repeated via/to ways are not supported",
                     ));
                 }
-                for &start in &by_way[&f.id] {
+                let mut start_at = 0;
+                while let Some(start) = access.way_edge(f.id, start_at)? {
+                    start_at += 1;
                     paths(
-                        edges,
-                        outgoing,
+                        access,
                         &ways,
                         0,
                         vec![start],
@@ -230,11 +327,12 @@ pub(crate) fn resolve(
                         &mut sequences,
                         &mut work,
                     )
-                    .map_err(|()| {
-                        fail(
+                    .map_err(|error| match error {
+                        WalkError::Access(error) => ResolveError::Access(error),
+                        WalkError::Limit => fail(
                             "RestrictionLimitExceeded",
                             "restriction path search budget exceeded",
-                        )
+                        ),
                     })?;
                 }
             }
@@ -254,31 +352,34 @@ pub(crate) fn resolve(
 }
 #[allow(clippy::too_many_arguments)]
 fn paths(
-    edges: &[Edge],
-    outgoing: &routeweft_dataset::Adjacency,
+    access: &mut impl Access,
     ways: &[i64],
     index: usize,
     path: Vec<usize>,
     entered: bool,
     out: &mut Vec<Vec<usize>>,
     work: &mut usize,
-) -> Result<(), ()> {
+) -> std::result::Result<(), WalkError> {
     *work += 1;
     if *work > 100_000 || path.len() >= 256 || out.len() > 10_000 {
-        return Err(());
+        return Err(WalkError::Limit);
     }
-    let last = *path.last().ok_or(())?;
-    for &next in &outgoing[edges[last].to] {
+    let last = *path.last().ok_or(WalkError::Limit)?;
+    let last_edge = access.edge(last)?;
+    let mut at = 0;
+    while let Some(next) = access.outgoing(last_edge.to, at)? {
+        at += 1;
         *work += 1;
         if *work > 100_000 || out.len() >= 10_000 {
-            return Err(());
+            return Err(WalkError::Limit);
         }
-        if path.contains(&next) || edges[next].to == edges[last].from {
+        let next_edge = access.edge(next)?;
+        if path.contains(&next) || next_edge.to == last_edge.from {
             continue;
         }
-        let next_index = if edges[next].way == ways[index] {
+        let next_index = if next_edge.way == ways[index] {
             Some(index)
-        } else if entered && index + 1 < ways.len() && edges[next].way == ways[index + 1] {
+        } else if entered && index + 1 < ways.len() && next_edge.way == ways[index + 1] {
             Some(index + 1)
         } else {
             None
@@ -289,9 +390,19 @@ fn paths(
             if i == ways.len() - 1 {
                 out.push(p);
             } else {
-                paths(edges, outgoing, ways, i, p, true, out, work)?;
+                paths(access, ways, i, p, true, out, work)?;
             }
         }
     }
     Ok(())
+}
+
+enum WalkError {
+    Limit,
+    Access(crate::Error),
+}
+impl From<crate::Error> for WalkError {
+    fn from(error: crate::Error) -> Self {
+        Self::Access(error)
+    }
 }
