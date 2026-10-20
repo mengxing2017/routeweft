@@ -487,7 +487,7 @@ fn input(input: &Path, options: BuildOptions) -> Result<(Graph, InputReport)> {
     }
     let source = routeweft_dataset::hash_file(input).map_err(input_error)?;
     let result = (|| {
-        let osm = pbf::read(input).map_err(|e| {
+        let osm = pbf::read_for_driving(input).map_err(|e| {
             let mut error = Error::from(e);
             error.report.failure_code = Some("PbfReadError".into());
             error

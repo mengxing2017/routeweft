@@ -35,6 +35,7 @@ pub struct Osm {
     estimated_bytes: usize,
     relation_ids: BTreeSet<i64>,
     scan_only: bool,
+    driving_projection: bool,
     counts: [u64; 3],
     decoded_bytes: u64,
 }
@@ -224,11 +225,77 @@ fn point(lon: i64, lat: i64, g: i64, lo: i64, la: i64) -> Result<Point> {
     p.coordinate()?;
     Ok(p)
 }
-fn insert_node(osm: &mut Osm, node: Node) -> Result<()> {
+// Keep this projection in sync with graph_attempt's driving profile. Decode and
+// charge the complete object first; unused data must not hide malformed input.
+fn retain_tags(tags: &mut Tags, keep: impl Fn(&str) -> bool) {
+    tags.retain(|key, _| keep(key));
+    // retain() can leave an allocated empty tree root behind.
+    if tags.is_empty() {
+        *tags = Tags::new();
+    }
+}
+fn driving_way_tag(key: &str) -> bool {
+    matches!(
+        key,
+        "highway" | "name" | "area" | "service" | "reversible" | "oneway" | "junction"
+    ) || key.contains(":conditional")
+        || [
+            "motorcar",
+            "motor_vehicle",
+            "vehicle",
+            "access",
+            "maxspeed",
+            "maxheight",
+            "maxwidth",
+            "maxweight",
+            "maxlength",
+            "maxaxleload",
+        ]
+        .iter()
+        .any(|base| {
+            key == *base
+                || key
+                    .strip_prefix(base)
+                    .is_some_and(|suffix| suffix.starts_with(':'))
+        })
+}
+fn insert_way(osm: &mut Osm, mut way: Way) -> Result<()> {
+    osm.charge(128 + way.refs.len() * 8 + tag_bytes(&way.tags))?;
+    osm.counts[1] += 1;
+    if osm.scan_only {
+        return Ok(());
+    }
+    if osm.driving_projection {
+        retain_tags(&mut way.tags, driving_way_tag);
+    }
+    // Even unsupported ways retain their references: restriction diagnostics
+    // distinguish missing nodes from roads excluded by the profile.
+    if osm.ways.insert(way.id, way).is_some() {
+        return Err(invalid("duplicate way"));
+    }
+    Ok(())
+}
+fn project_relation(relation: &mut Relation) {
+    // All restriction payloads remain intact, including unsupported/excepted
+    // modes, so conservative resolution and its diagnostics cannot lose data.
+    if crate::value(&relation.tags, "type") != "restriction" {
+        relation.members = Vec::new();
+        retain_tags(&mut relation.tags, |key| key == "type");
+    }
+}
+fn insert_node(osm: &mut Osm, mut node: Node) -> Result<()> {
     osm.charge(128 + tag_bytes(&node.tags))?;
     osm.counts[0] += 1;
     if osm.scan_only {
         return Ok(());
+    }
+    if osm.driving_projection {
+        retain_tags(&mut node.tags, |key| {
+            matches!(
+                key,
+                "motorcar" | "motor_vehicle" | "vehicle" | "access" | "barrier"
+            ) || key.contains(":conditional")
+        });
     }
     if osm.nodes.insert(node.id, node).is_some() {
         return Err(invalid("duplicate node"));
@@ -325,11 +392,7 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                         refs: delta(packed(&v, 8)?)?,
                         tags: tags(&v, &table)?,
                     };
-                    osm.charge(128 + way.refs.len() * 8 + tag_bytes(&way.tags))?;
-                    osm.counts[1] += 1;
-                    if !osm.scan_only && osm.ways.insert(way.id, way).is_some() {
-                        return Err(invalid("duplicate way"));
-                    }
+                    insert_way(osm, way)?;
                 }
                 4 => {
                     let relation_id = int(&v, 1, None)? as i64;
@@ -369,11 +432,15 @@ fn primitive(bytes: &[u8], osm: &mut Osm) -> Result<()> {
                     )?;
                     osm.counts[2] += 1;
                     if !osm.scan_only {
-                        osm.relations.push(Relation {
+                        let mut relation = Relation {
                             id: relation_id,
                             members,
                             tags,
-                        });
+                        };
+                        if osm.driving_projection {
+                            project_relation(&mut relation);
+                        }
+                        osm.relations.push(relation);
                     }
                 }
                 _ => {}
@@ -409,7 +476,7 @@ pub fn scan(path: &Path) -> Result<StructureReport> {
         ));
     }
     let source_sha256 = routeweft_dataset::hash_file(path)?;
-    let osm = read_mode(path, true)?;
+    let osm = read_mode(path, true, false)?;
     if routeweft_dataset::hash_file(path)? != source_sha256 {
         return Err(invalid("input changed while scanning"));
     }
@@ -427,9 +494,15 @@ pub fn scan(path: &Path) -> Result<StructureReport> {
     })
 }
 pub fn read(path: &Path) -> Result<Osm> {
-    read_mode(path, false)
+    read_mode(path, false, false)
 }
-fn read_mode(path: &Path, scan_only: bool) -> Result<Osm> {
+// Build-only projection; decoding, validation and full-object resource accounting
+// happen before unused tags and non-restriction members are released.
+// Public read remains lossless.
+pub(crate) fn read_for_driving(path: &Path) -> Result<Osm> {
+    read_mode(path, false, true)
+}
+fn read_mode(path: &Path, scan_only: bool, driving_projection: bool) -> Result<Osm> {
     let mut input = std::fs::File::open(path)?;
     if input.metadata()?.len() > 512 * 1024 * 1024 {
         return Err(resource_limit(
@@ -441,6 +514,7 @@ fn read_mode(path: &Path, scan_only: bool) -> Result<Osm> {
     }
     let mut osm = Osm {
         scan_only,
+        driving_projection,
         ..Default::default()
     };
     let mut header = false;
@@ -549,6 +623,295 @@ fn read_mode(path: &Path, scan_only: bool) -> Result<Osm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn way_projection_preserves_profile_restrictions_and_full_budget() {
+        for (key, val) in [
+            ("source", "discard"),
+            ("name", "Keep Road Name"),
+            ("highway", "footway"),
+            ("area", "yes"),
+            ("service", "emergency_access"),
+            ("reversible", "yes"),
+            ("oneway", "-1"),
+            ("oneway", "unsupported"),
+            ("junction", "roundabout"),
+            ("access", "no"),
+            ("access:forward", "no"),
+            ("vehicle:backward", "private"),
+            ("motor_vehicle:forward", "no"),
+            ("motorcar:backward", "no"),
+            ("maxspeed", "20 mph"),
+            ("maxspeed:forward", "10"),
+            ("maxspeed:backward", "invalid"),
+            ("maxheight:physical", "3"),
+            ("maxwidth", "2"),
+            ("maxweight:hgv", "7"),
+            ("maxlength", "5"),
+            ("maxaxleload", "4"),
+            ("unexpected:conditional:suffix", "no @ (Mo)"),
+        ] {
+            let mut full = Osm::default();
+            let mut projected = Osm {
+                driving_projection: true,
+                ..Default::default()
+            };
+            for osm in [&mut full, &mut projected] {
+                for id in 1..=3 {
+                    insert_node(
+                        osm,
+                        Node {
+                            id,
+                            point: Point {
+                                lon: id as f64 * 0.001,
+                                lat: 0.,
+                            },
+                            tags: Tags::new(),
+                        },
+                    )
+                    .unwrap();
+                }
+                for (id, refs) in [(10, vec![1, 2]), (20, vec![2, 3])] {
+                    let mut tags = Tags::from([
+                        ("highway".into(), "residential".into()),
+                        ("source".into(), "survey".into()),
+                    ]);
+                    if id == 10 {
+                        tags.insert(key.into(), val.into());
+                    }
+                    insert_way(osm, Way { id, refs, tags }).unwrap();
+                }
+                osm.relations.push(Relation {
+                    id: 100,
+                    tags: Tags::from([
+                        ("type".into(), "restriction".into()),
+                        ("restriction".into(), "no_straight_on".into()),
+                    ]),
+                    members: [(10, 1, "from"), (2, 0, "via"), (20, 1, "to")]
+                        .into_iter()
+                        .map(|(id, kind, role)| Member {
+                            id,
+                            kind,
+                            role: role.into(),
+                        })
+                        .collect(),
+                });
+            }
+            assert_eq!(full.estimated_bytes, projected.estimated_bytes);
+            assert_eq!(full.ways[&10].refs, projected.ways[&10].refs);
+            assert!(!projected.ways[&20].tags.contains_key("source"));
+            for policy in [
+                crate::InvalidRestrictionPolicy::Reject,
+                crate::InvalidRestrictionPolicy::BlockWays,
+            ] {
+                let options = crate::BuildOptions {
+                    invalid_restrictions: policy,
+                };
+                assert_eq!(
+                    format!("{:?}", crate::prepare(&full, options)),
+                    format!("{:?}", crate::prepare(&projected, options)),
+                    "{key}={val}"
+                );
+            }
+            assert!(insert_way(
+                &mut projected,
+                Way {
+                    id: 10,
+                    refs: vec![],
+                    tags: Tags::new()
+                }
+            )
+            .is_err());
+        }
+        // Dropped tags must still trip the original full-object memory budget.
+        for projected in [false, true] {
+            let mut osm = Osm {
+                driving_projection: projected,
+                estimated_bytes: 512 * 1024 * 1024 - 128,
+                ..Default::default()
+            };
+            assert!(matches!(
+                insert_way(
+                    &mut osm,
+                    Way {
+                        id: 1,
+                        refs: vec![],
+                        tags: Tags::from([("source".into(), "survey".into())])
+                    }
+                ),
+                Err(Error::ResourceLimit(_))
+            ));
+        }
+    }
+    #[test]
+    fn nonrestriction_payload_is_validated_before_release() {
+        fn bytes(field: u8, payload: &[u8]) -> Vec<u8> {
+            let mut result = vec![field * 8 + 2, payload.len() as u8];
+            result.extend(payload);
+            result
+        }
+        let table = [
+            bytes(1, b""),
+            bytes(1, b"type"),
+            bytes(1, b"multipolygon"),
+            bytes(1, b"restriction"),
+            bytes(1, b"name"),
+            bytes(1, b"unused"),
+        ]
+        .concat();
+        for restriction in [false, true] {
+            for failure in 0..4 {
+                let relation = [
+                    vec![8, 1],
+                    bytes(2, &[1, 4]),
+                    bytes(3, &[if restriction { 3 } else { 2 }, 5]),
+                    bytes(
+                        8,
+                        if failure == 1 {
+                            &[99]
+                        } else if failure == 2 {
+                            &[]
+                        } else {
+                            &[5]
+                        },
+                    ),
+                    bytes(9, &[2]),
+                    bytes(10, if failure == 3 { &[3] } else { &[1] }),
+                ]
+                .concat();
+                let block = [bytes(1, &table), bytes(2, &bytes(4, &relation))].concat();
+                let mut full = Osm::default();
+                let mut projected = Osm {
+                    driving_projection: true,
+                    ..Default::default()
+                };
+                assert_eq!(primitive(&block, &mut full).is_ok(), failure == 0);
+                assert_eq!(primitive(&block, &mut projected).is_ok(), failure == 0);
+                if failure == 0 {
+                    assert_eq!(full.estimated_bytes, projected.estimated_bytes);
+                    assert_eq!(full.relations[0].members.len(), 1);
+                    assert_eq!(
+                        projected.relations[0].members.len(),
+                        usize::from(restriction)
+                    );
+                    assert_eq!(
+                        projected.relations[0].tags.contains_key("name"),
+                        restriction
+                    );
+                    assert!(primitive(&block, &mut projected).is_err());
+                }
+            }
+        }
+    }
+    #[test]
+    fn projection_validates_normal_and_dense_tag_references_before_discarding() {
+        fn bytes(field: u8, payload: &[u8]) -> Vec<u8> {
+            let mut result = vec![field * 8 + 2, payload.len() as u8];
+            result.extend(payload);
+            result
+        }
+        let table = [bytes(1, b""), bytes(1, b"name"), bytes(1, b"label")].concat();
+        for dense in [false, true] {
+            for valid in [false, true] {
+                let reference = if valid { 2 } else { 99 };
+                let node = if dense {
+                    [
+                        bytes(1, &[2]),
+                        bytes(8, &[0]),
+                        bytes(9, &[0]),
+                        bytes(10, &[1, reference, 0]),
+                    ]
+                    .concat()
+                } else {
+                    [
+                        vec![8, 2, 64, 0, 72, 0],
+                        bytes(2, &[1]),
+                        bytes(3, &[reference]),
+                    ]
+                    .concat()
+                };
+                let primitive_block = [
+                    bytes(1, &table),
+                    bytes(2, &bytes(if dense { 2 } else { 1 }, &node)),
+                ]
+                .concat();
+                let mut full = Osm::default();
+                let mut projected = Osm {
+                    driving_projection: true,
+                    ..Default::default()
+                };
+                assert_eq!(primitive(&primitive_block, &mut full).is_ok(), valid);
+                assert_eq!(primitive(&primitive_block, &mut projected).is_ok(), valid);
+                if valid {
+                    assert_eq!(full.nodes[&1].tags["name"], "label");
+                    assert!(projected.nodes[&1].tags.is_empty());
+                    assert_eq!(full.estimated_bytes, projected.estimated_bytes);
+                }
+            }
+        }
+    }
+    #[test]
+    fn driving_projection_preserves_profile_decisions_and_full_budget() {
+        for (key, val) in [
+            ("name", "discard me"),
+            ("access", "no"),
+            ("motorcar", "yes"),
+            ("motor_vehicle", "private"),
+            ("vehicle", "no"),
+            ("barrier", "bollard"),
+            ("barrier", "entrance"),
+            ("unexpected:conditional:suffix", "yes @ (Mo)"),
+        ] {
+            let mut full = Osm::default();
+            let mut projected = Osm {
+                driving_projection: true,
+                ..Default::default()
+            };
+            for osm in [&mut full, &mut projected] {
+                for id in 1..=3 {
+                    let mut tags = Tags::from([("source".into(), "survey".into())]);
+                    if id == 2 {
+                        tags.insert(key.into(), val.into());
+                    }
+                    insert_node(
+                        osm,
+                        Node {
+                            id,
+                            point: Point {
+                                lon: id as f64 * 0.001,
+                                lat: 0.,
+                            },
+                            tags,
+                        },
+                    )
+                    .unwrap();
+                }
+                osm.ways.insert(
+                    10,
+                    Way {
+                        id: 10,
+                        refs: vec![1, 2, 3],
+                        tags: Tags::from([("highway".into(), "residential".into())]),
+                    },
+                );
+            }
+            assert_eq!(full.estimated_bytes, projected.estimated_bytes);
+            assert!(full.nodes[&1].tags.contains_key("source"));
+            assert!(projected.nodes[&1].tags.is_empty());
+            assert_eq!(
+                format!("{:?}", crate::graph(&full)),
+                format!("{:?}", crate::graph(&projected))
+            );
+            assert!(insert_node(
+                &mut projected,
+                Node {
+                    id: 1,
+                    point: Point { lon: 0., lat: 0. },
+                    tags: Tags::new(),
+                }
+            )
+            .is_err());
+        }
+    }
     #[test]
     fn structural_scan_discards_objects_and_rejects_full_decode_capacity() {
         let mut scan = Osm {
