@@ -167,6 +167,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     if command == "version" {
         return Ok(
             json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
+            "build":serde_json::from_str::<Value>(include_str!(concat!(env!("OUT_DIR"), "/build-identity.json"))).expect("build identity"),
             "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
             "commands":["build","preflight","inspect","verify","nearest","route","version"],
             "invalid_restriction_policies":["reject","block_ways"],
