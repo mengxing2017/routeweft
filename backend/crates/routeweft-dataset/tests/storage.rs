@@ -86,3 +86,65 @@ fn symlinked_payload_is_rejected() {
     assert!(open(&a, Default::default()).is_err());
     std::fs::remove_dir_all(a).unwrap();
 }
+
+#[test]
+fn streamed_graph_preserves_v1_bytes_and_rejects_tampering_and_trailing_data() {
+    let path = temp();
+    let expected = serde_json::to_vec(&graph()).unwrap();
+    let manifest = write(&path, &graph(), hash(b"streaming"), None, BTreeMap::new()).unwrap();
+    assert_eq!(std::fs::read(path.join("graph.json")).unwrap(), expected);
+    assert_eq!(manifest.graph_sha256, hash(&expected));
+    assert_eq!(manifest.graph_bytes, expected.len() as u64);
+    for replacement in [
+        expected
+            .iter()
+            .copied()
+            .chain(b"{}".iter().copied())
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .copied()
+            .chain(b" ".iter().copied())
+            .collect(),
+    ] {
+        std::fs::write(path.join("graph.json"), replacement).unwrap();
+        assert!(open(&path, Default::default()).is_err());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn metadata_inspection_never_claims_payload_integrity() {
+    let path = temp();
+    let manifest = write(&path, &graph(), hash(b"metadata"), None, BTreeMap::new()).unwrap();
+    std::fs::write(path.join("graph.json"), b"corrupt").unwrap();
+    assert_eq!(
+        routeweft_dataset::inspect_manifest(&path, Default::default()).unwrap(),
+        manifest
+    );
+    assert!(open(&path, Default::default()).is_err());
+    let mut altered = manifest;
+    altered.nodes += 1; // counts are not identity fields; metadata does not validate topology.
+    altered.dataset_id = "forged".into();
+    std::fs::write(
+        path.join("manifest.json"),
+        serde_json::to_vec(&altered).unwrap(),
+    )
+    .unwrap();
+    assert!(routeweft_dataset::inspect_manifest(&path, Default::default()).is_err());
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn streaming_publication_still_rejects_invalid_source_identity() {
+    let path = temp();
+    assert!(write(
+        &path,
+        &graph(),
+        "invalid-hash".into(),
+        None,
+        BTreeMap::new()
+    )
+    .is_err());
+    assert!(!path.exists());
+}
