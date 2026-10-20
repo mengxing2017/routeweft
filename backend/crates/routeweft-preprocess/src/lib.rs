@@ -1,11 +1,12 @@
 //! Offline PBF preprocessing with a deliberately conservative driving profile.
 mod diagnostics;
+mod maxspeed;
 pub mod pbf;
 mod restrictions;
 pub mod staging;
 pub use diagnostics::{
-    BuildOptions, Error, InputReport, InvalidRestrictionPolicy, MemberDiagnostic,
-    RestrictionDiagnostic, Result,
+    BuildOptions, Error, InputReport, InvalidMaxspeedPolicy, InvalidRestrictionPolicy,
+    MaxspeedDiagnostic, MemberDiagnostic, RestrictionDiagnostic, Result,
 };
 use pbf::{Osm, Tags};
 use routeweft_dataset::{Adjacency, Edge, Error as DataError, Graph, Manifest, Point};
@@ -138,7 +139,12 @@ fn select_way(
     way: &pbf::Way,
     conditional: bool,
     stats: &mut BTreeMap<String, u64>,
+    policy: InvalidMaxspeedPolicy,
+    audit: &mut Vec<MaxspeedDiagnostic>,
 ) -> Result<Option<WaySelection>> {
+    if policy == InvalidMaxspeedPolicy::UseDefault {
+        stats.insert("maxspeed_policy_use_default".into(), 1);
+    }
     let class = value(&way.tags, "highway");
     let Some(default) = default_speed(class) else {
         count(stats, "unsupported_way_class");
@@ -201,10 +207,11 @@ fn select_way(
             )))
         }
     };
-    let contextual = |e: Error| invalid(format!("way {}: {e}", way.id));
-    let base = speed(value(&way.tags, "maxspeed"), default).map_err(contextual)?;
-    let forward = speed(value(&way.tags, "maxspeed:forward"), base).map_err(contextual)?;
-    let backward = speed(value(&way.tags, "maxspeed:backward"), base).map_err(contextual)?;
+    let mut resolve =
+        |field, fallback| maxspeed::resolve(way, field, fallback, policy, audit, stats);
+    let base = resolve("maxspeed", default)?;
+    let forward = resolve("maxspeed:forward", base)?;
+    let backward = resolve("maxspeed:backward", base)?;
     Ok(Some(WaySelection {
         direction,
         forward,
@@ -220,7 +227,12 @@ fn blocked_node(tags: &Tags) -> bool {
                 "no" | "entrance" | "cattle_grid" | "toll_booth" | "border_control"
             ))
 }
-fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap<String, u64>)> {
+fn graph_attempt(
+    osm: &Osm,
+    excluded: &BTreeSet<i64>,
+    policy: InvalidMaxspeedPolicy,
+    speed_audit: &mut Vec<MaxspeedDiagnostic>,
+) -> Result<(Graph, BTreeMap<String, u64>)> {
     let mut stats = BTreeMap::from([
         ("input_nodes".into(), osm.nodes.len() as u64),
         ("input_ways".into(), osm.ways.len() as u64),
@@ -256,7 +268,13 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
             direction,
             forward,
             backward,
-        }) = select_way(way, conditional_ways.contains(&way.id), &mut stats)?
+        }) = select_way(
+            way,
+            conditional_ways.contains(&way.id),
+            &mut stats,
+            policy,
+            speed_audit,
+        )?
         else {
             continue;
         };
@@ -472,7 +490,8 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
     let mut excluded = BTreeSet::new();
     let mut audit = Vec::new();
     loop {
-        match graph_attempt(osm, &excluded) {
+        let mut speed_audit = Vec::new();
+        match graph_attempt(osm, &excluded, options.invalid_maxspeed, &mut speed_audit) {
             Ok((graph, mut stats)) => {
                 stats.insert("invalid_restrictions_blocked".into(), audit.len() as u64);
                 stats.insert(
@@ -482,6 +501,8 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                 let report = InputReport {
                     valid: true,
                     policy: options.invalid_restrictions,
+                    maxspeed_policy: options.invalid_maxspeed,
+                    maxspeed_diagnostics: speed_audit,
                     nodes: graph.nodes.len(),
                     edges: graph.edges.len(),
                     restrictions: graph.forbidden.len(),
@@ -495,6 +516,8 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
             }
             Err(mut error) => {
                 error.report.policy = options.invalid_restrictions;
+                error.report.maxspeed_policy = options.invalid_maxspeed;
+                error.report.maxspeed_diagnostics = speed_audit;
                 error.report.source_snapshot = osm.snapshot;
                 if options.invalid_restrictions == InvalidRestrictionPolicy::Reject
                     || error.report.restriction_diagnostics.is_empty()
@@ -543,6 +566,7 @@ fn input(input: &Path, options: BuildOptions) -> Result<(Graph, InputReport)> {
         source,
         report: Box::new(InputReport {
             policy: options.invalid_restrictions,
+            maxspeed_policy: options.invalid_maxspeed,
             failure_code: Some("InputReadError".into()),
             ..Default::default()
         }),
@@ -577,6 +601,7 @@ fn input(input: &Path, options: BuildOptions) -> Result<(Graph, InputReport)> {
         }
         Err(mut error) => {
             error.report.policy = options.invalid_restrictions;
+            error.report.maxspeed_policy = options.invalid_maxspeed;
             error.report.source_sha256 = source;
             if error.report.failure_code.is_none() {
                 error.report.failure_code = Some("GraphValidationError".into());

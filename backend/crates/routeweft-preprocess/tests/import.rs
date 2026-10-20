@@ -225,6 +225,7 @@ fn malformed_relation_diagnostics_and_explicit_conservative_blocking() {
     );
     let options = BuildOptions {
         invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+        ..Default::default()
     };
     let (g, report) = prepare(&osm, options).unwrap();
     assert_eq!(report.blocked_way_ids, [10, 40]);
@@ -396,6 +397,7 @@ fn conservative_blocking_rechecks_dependent_restrictions() {
         &osm,
         BuildOptions {
             invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -466,6 +468,7 @@ fn excluding_the_only_allowed_exit_never_opens_other_turns() {
         &osm,
         BuildOptions {
             invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+            ..Default::default()
         },
     )
     .unwrap();

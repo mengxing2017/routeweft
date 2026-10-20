@@ -13,6 +13,23 @@ pub enum InvalidRestrictionPolicy {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BuildOptions {
     pub invalid_restrictions: InvalidRestrictionPolicy,
+    pub invalid_maxspeed: InvalidMaxspeedPolicy,
+}
+/// Explicit opt-in to estimate costs from the profile when a speed tag is invalid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidMaxspeedPolicy {
+    #[default]
+    Reject,
+    UseDefault,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaxspeedDiagnostic {
+    pub way_id: i64,
+    pub field: String,
+    pub value: String,
+    pub action: String,
+    pub effective_kmh: Option<f64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberDiagnostic {
@@ -72,6 +89,8 @@ pub struct InputReport {
     pub valid: bool,
     pub failure_code: Option<String>,
     pub policy: InvalidRestrictionPolicy,
+    pub maxspeed_policy: InvalidMaxspeedPolicy,
+    pub maxspeed_diagnostics: Vec<MaxspeedDiagnostic>,
     pub source_sha256: String,
     pub source_snapshot: Option<i64>,
     pub nodes: usize,
