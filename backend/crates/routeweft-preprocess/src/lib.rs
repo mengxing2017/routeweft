@@ -118,6 +118,98 @@ fn restriction_way_index(osm: &Osm) -> BTreeMap<i64, Vec<usize>> {
     }
     index
 }
+#[derive(Clone, Copy)]
+struct WaySelection {
+    direction: i32,
+    forward: f64,
+    backward: f64,
+}
+fn select_way(
+    way: &pbf::Way,
+    conditional: bool,
+    stats: &mut BTreeMap<String, u64>,
+) -> Result<Option<WaySelection>> {
+    let class = value(&way.tags, "highway");
+    let Some(default) = default_speed(class) else {
+        count(stats, "unsupported_way_class");
+        return Ok(None);
+    };
+    let exclusion = if !directional_access(&way.tags, "forward")
+        && !directional_access(&way.tags, "backward")
+    {
+        Some("blocked_way_access")
+    } else if value(&way.tags, "area") == "yes" {
+        Some("blocked_way_area")
+    } else if value(&way.tags, "service") == "emergency_access" {
+        Some("blocked_way_emergency_access")
+    } else if way.tags.keys().any(|k| {
+        [
+            "maxheight",
+            "maxwidth",
+            "maxweight",
+            "maxlength",
+            "maxaxleload",
+        ]
+        .iter()
+        .any(|base| k == base || k.starts_with(&format!("{base}:")))
+    }) {
+        Some("blocked_way_dimensions")
+    } else if conditional {
+        Some("blocked_way_conditional_restriction")
+    } else if way.tags.keys().any(|k| k.contains(":conditional")) {
+        Some("blocked_way_conditional_tag")
+    } else {
+        None
+    };
+    if let Some(reason) = exclusion {
+        count(stats, reason);
+        count(stats, "access_or_conditional_ways_blocked");
+        return Ok(None);
+    }
+    if !value(&way.tags, "reversible").is_empty()
+        || matches!(value(&way.tags, "oneway"), "reversible" | "alternating")
+    {
+        count(stats, "reversible_ways_blocked");
+        return Ok(None);
+    }
+    let direction = match value(&way.tags, "oneway") {
+        "yes" | "1" | "true" => 1,
+        "-1" => -1,
+        "no" | "0" | "false" => 0,
+        "" => {
+            if value(&way.tags, "junction") == "roundabout" || class == "motorway" {
+                1
+            } else {
+                0
+            }
+        }
+        _ => {
+            return Err(invalid(format!(
+                "way {}: unsupported oneway {}",
+                way.id,
+                value(&way.tags, "oneway")
+            )))
+        }
+    };
+    let contextual = |e: Error| invalid(format!("way {}: {e}", way.id));
+    let base = speed(value(&way.tags, "maxspeed"), default).map_err(contextual)?;
+    let forward = speed(value(&way.tags, "maxspeed:forward"), base).map_err(contextual)?;
+    let backward = speed(value(&way.tags, "maxspeed:backward"), base).map_err(contextual)?;
+    Ok(Some(WaySelection {
+        direction,
+        forward,
+        backward,
+    }))
+}
+fn blocked_node(tags: &Tags) -> bool {
+    !access(tags)
+        || tags.keys().any(|k| k.contains(":conditional"))
+        || (!value(tags, "barrier").is_empty()
+            && !matches!(
+                value(tags, "barrier"),
+                "no" | "entrance" | "cattle_grid" | "toll_booth" | "border_control"
+            ))
+}
 fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap<String, u64>)> {
     let mut stats = BTreeMap::from([
         ("input_nodes".into(), osm.nodes.len() as u64),
@@ -128,14 +220,7 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
     let mut used = BTreeSet::new();
     let mut blocked = BTreeSet::new();
     for (&id, node) in &osm.nodes {
-        if !access(&node.tags)
-            || node.tags.keys().any(|k| k.contains(":conditional"))
-            || (!value(&node.tags, "barrier").is_empty()
-                && !matches!(
-                    value(&node.tags, "barrier"),
-                    "no" | "entrance" | "cattle_grid" | "toll_booth" | "border_control"
-                ))
-        {
+        if blocked_node(&node.tags) {
             blocked.insert(id);
             count(&mut stats, "blocked_nodes");
         }
@@ -157,72 +242,14 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
         if excluded.contains(&way.id) {
             continue;
         }
-        let class = value(&way.tags, "highway");
-        let Some(default) = default_speed(class) else {
-            count(&mut stats, "unsupported_way_class");
+        let Some(WaySelection {
+            direction,
+            forward,
+            backward,
+        }) = select_way(way, conditional_ways.contains(&way.id), &mut stats)?
+        else {
             continue;
         };
-        let exclusion = if !directional_access(&way.tags, "forward")
-            && !directional_access(&way.tags, "backward")
-        {
-            Some("blocked_way_access")
-        } else if value(&way.tags, "area") == "yes" {
-            Some("blocked_way_area")
-        } else if value(&way.tags, "service") == "emergency_access" {
-            Some("blocked_way_emergency_access")
-        } else if way.tags.keys().any(|k| {
-            [
-                "maxheight",
-                "maxwidth",
-                "maxweight",
-                "maxlength",
-                "maxaxleload",
-            ]
-            .iter()
-            .any(|base| k == base || k.starts_with(&format!("{base}:")))
-        }) {
-            Some("blocked_way_dimensions")
-        } else if conditional_ways.contains(&way.id) {
-            Some("blocked_way_conditional_restriction")
-        } else if way.tags.keys().any(|k| k.contains(":conditional")) {
-            Some("blocked_way_conditional_tag")
-        } else {
-            None
-        };
-        if let Some(reason) = exclusion {
-            count(&mut stats, reason);
-            count(&mut stats, "access_or_conditional_ways_blocked");
-            continue;
-        }
-        if !value(&way.tags, "reversible").is_empty()
-            || matches!(value(&way.tags, "oneway"), "reversible" | "alternating")
-        {
-            count(&mut stats, "reversible_ways_blocked");
-            continue;
-        }
-        let direction = match value(&way.tags, "oneway") {
-            "yes" | "1" | "true" => 1,
-            "-1" => -1,
-            "no" | "0" | "false" => 0,
-            "" => {
-                if value(&way.tags, "junction") == "roundabout" || class == "motorway" {
-                    1
-                } else {
-                    0
-                }
-            }
-            _ => {
-                return Err(invalid(format!(
-                    "way {}: unsupported oneway {}",
-                    way.id,
-                    value(&way.tags, "oneway")
-                )))
-            }
-        };
-        let contextual = |e: Error| invalid(format!("way {}: {e}", way.id));
-        let base = speed(value(&way.tags, "maxspeed"), default).map_err(contextual)?;
-        let forward = speed(value(&way.tags, "maxspeed:forward"), base).map_err(contextual)?;
-        let backward = speed(value(&way.tags, "maxspeed:backward"), base).map_err(contextual)?;
         for &node in &way.refs {
             if !osm.nodes.contains_key(&node) {
                 return Err(invalid(format!(
