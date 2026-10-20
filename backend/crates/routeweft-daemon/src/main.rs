@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -48,6 +48,18 @@ fn build_error(error: routeweft_preprocess::Error) -> Failure {
     let message = error.to_string();
     let mut failure = data_error(error.source);
     failure.message = message;
+    if matches!(
+        error.report.failure_code.as_deref(),
+        Some("BuildCancelled" | "BuildTimeout")
+    ) {
+        failure.kind = if error.report.failure_code.as_deref() == Some("BuildCancelled") {
+            "Cancelled"
+        } else {
+            "BudgetExceeded"
+        }
+        .into();
+        failure.code = 5;
+    }
     failure.details = Some(error.report);
     failure
 }
@@ -92,6 +104,11 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--output",
             "--invalid-restrictions",
             "--format",
+            "--builder",
+            "--scratch-dir",
+            "--max-scratch-bytes",
+            "--max-scratch-files",
+            "--build-timeout-ms",
         ],
         "preflight" => &["--input", "--profile", "--invalid-restrictions", "--mode"],
         "version" => &[],
@@ -154,7 +171,8 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "commands":["build","preflight","inspect","verify","nearest","route","version"],
             "invalid_restriction_policies":["reject","block_ways"],
             "capabilities": {
-                "builder":"in_memory", "external_memory_build":false,
+                "builder":"in_memory", "build_modes":["memory","external"],
+                "external_build_formats":[2], "external_memory_build":false,
                 "large_pbf_3gib":false, "dataset_access":"in_memory",
                 "preflight":"full_semantic_build", "preflight_cache":false,
                 "preflight_modes":["full","structure"],
@@ -211,6 +229,75 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "2" => routeweft_dataset::DatasetFormat::BinaryV2,
             _ => return Err(bad("invalid dataset format; use 1 or 2")),
         };
+        let builder = flags.get("--builder").copied().unwrap_or("memory");
+        if !matches!(builder, "memory" | "external") {
+            return Err(bad("invalid builder; use memory or external"));
+        }
+        let external_flags = [
+            "--scratch-dir",
+            "--max-scratch-bytes",
+            "--max-scratch-files",
+            "--build-timeout-ms",
+        ];
+        if builder == "memory" && external_flags.iter().any(|key| flags.contains_key(key)) {
+            return Err(bad("external build options require --builder external"));
+        }
+        if builder == "external" {
+            if format != routeweft_dataset::DatasetFormat::BinaryV2 {
+                return Err(bad("external builder requires --format 2"));
+            }
+            let number = |key: &str, default: u64| -> Result<u64, Failure> {
+                flags
+                    .get(key)
+                    .map(|v| v.parse().map_err(|_| bad(format!("invalid {key}"))))
+                    .unwrap_or(Ok(default))
+            };
+            let output = Path::new(required("--output")?);
+            let scratch = flags
+                .get("--scratch-dir")
+                .map(Path::new)
+                .unwrap_or_else(|| {
+                    output
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(Path::new("."))
+                });
+            let mut external = routeweft_preprocess::staging::ExternalBuildOptions {
+                build: options,
+                ..Default::default()
+            };
+            external.stage.scratch_bytes =
+                number("--max-scratch-bytes", external.stage.scratch_bytes)?;
+            external.stage.run_files = usize::try_from(number(
+                "--max-scratch-files",
+                external.stage.run_files as u64,
+            )?)
+            .map_err(|_| bad("scratch file limit"))?;
+            let deadline = if flags.contains_key("--build-timeout-ms") {
+                Some(
+                    Instant::now()
+                        .checked_add(Duration::from_millis(number("--build-timeout-ms", 0)?))
+                        .ok_or_else(|| bad("build timeout"))?,
+                )
+            } else {
+                None
+            };
+            let built = routeweft_preprocess::staging::build_external(
+                input,
+                output,
+                scratch,
+                external,
+                routeweft_preprocess::staging::ExternalBuildControl {
+                    deadline,
+                    ..Default::default()
+                },
+            )
+            .map_err(build_error)?;
+            return Ok(
+                json!({"schema":1,"status":"ok","manifest":built.manifest,"report":built.report,
+                "build":{"builder":"external","resources":built.resources}}),
+            );
+        }
         let (m, report) = routeweft_preprocess::build_with_format(
             input,
             Path::new(required("--output")?),
