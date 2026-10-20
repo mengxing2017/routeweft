@@ -22,6 +22,15 @@ pub fn distance(a: Point, b: Point) -> f64 {
         + a.lat.to_radians().cos() * b.lat.to_radians().cos() * (dlon / 2.0).sin().powi(2);
     6_371_008.8 * 2.0 * h.clamp(0.0, 1.0).sqrt().asin()
 }
+fn segment_length(a: Point, b: Point) -> Result<u64> {
+    if (a.lon - b.lon).abs() > 180. || a.lat.abs() > 85. || b.lat.abs() > 85. {
+        return Err(invalid("unsupported geographic extent"));
+    }
+    Ok((distance(a, b) * 1000.).round() as u64)
+}
+fn edge_duration(length: u64, speed: f64) -> u64 {
+    ((length as f64 * 3.6 / speed).round() as u64).max(1)
+}
 fn value<'a>(tags: &'a Tags, key: &str) -> &'a str {
     tags.get(key).map(String::as_str).unwrap_or("")
 }
@@ -307,10 +316,7 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
                 .map_err(|_| invalid("selected node mapping"))?;
             let a = nodes[from];
             let b = nodes[to];
-            if (a.lon - b.lon).abs() > 180. || a.lat.abs() > 85. || b.lat.abs() > 85. {
-                return Err(invalid("unsupported geographic extent"));
-            }
-            let length = (distance(a, b) * 1000.).round() as u64;
+            let length = segment_length(a, b)?;
             if length == 0 {
                 count(&mut stats, "zero_length_segments_omitted");
                 continue;
@@ -349,7 +355,7 @@ fn graph_attempt(osm: &Osm, excluded: &BTreeSet<i64>) -> Result<(Graph, BTreeMap
                     to,
                     way: way.id,
                     distance_mm: length,
-                    duration_ms: ((length as f64 * 3.6 / speed).round() as u64).max(1),
+                    duration_ms: edge_duration(length, speed),
                     name: value(&way.tags, "name").into(),
                     class: value(&way.tags, "highway").into(),
                     roundabout: value(&way.tags, "junction") == "roundabout",
