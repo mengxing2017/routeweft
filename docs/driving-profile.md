@@ -6,7 +6,7 @@
 | --- | --- |
 | 道路 | motorway/trunk/primary/secondary/tertiary 及 link、unclassified/residential/living_street/service；其他类别省略并统计 |
 | 默认速度 km/h | motorway 110、trunk 90、primary 70、secondary 60、tertiary 50、unclassified 40、residential 30、living_street 10、service 20；各级 link 为 50/45/40/35/30 |
-| maxspeed | 正数 km/h、km/h 后缀、mph；forward/backward；上限取默认速度与声明限速较低值。未知文本/条件速度不猜测 |
+| maxspeed | 正数 km/h、km/h 后缀、mph；forward/backward；上限取默认速度与声明限速较低值。无效值默认拒绝；显式 `--invalid-maxspeed use_default` 可按类别/通用速度回退并逐字段审计，属于成本估计。条件速度仍保守阻断，详见 [CLI 策略](cli.md#无效限速值的显式回退) |
 | access | motorcar→motor_vehicle→vehicle→access，方向标签优先于同层通用标签；yes/permissive/designated 允许，其他显式值保守拒绝 |
 | 单行 | yes/1/true、-1、no/0/false；roundabout 和 motorway 默认正向单行；未知值拒绝，reversible/alternating 排除 |
 | 条件规则 | 带 :conditional 的道路/节点保守阻断；适用于 driving 且未被 except 排除的条件转向 relation 涉及的 way 排除并计数，不解释时段；纯其他模式条件不阻断汽车道路 |
@@ -18,12 +18,12 @@
 | 不可解析限制 | 默认严格拒绝；可显式 block_ways 保守排除受影响道路，迭代校验并输出关系级审计；不忽略后放行 |
 | 拓扑 | 同一 OSM node 连接，几何交叉不创造连通；缺失引用拒绝构建 |
 | 端点与途经点 | 最多 10 点，边中点按方向拆分；不在边中途掉头，途经点不重置限制状态；节点处未禁止掉头可行 |
-| Nearest | 局部平面投影 + 球面距离，半径 0～10 km，方向候选默认 8、最多 16；不使用高度/heading |
+| Nearest | 局部平面投影 + 球面距离，半径 0～10 km，方向候选默认 8、最多 16；city 使用地图中间纬度，显式 regional 使用查询点纬度；不使用高度/heading |
 | 指引 | 出发/到达、基本转向、掉头、环岛进出及出口编号、基于 link 类别的简单 merge/exit；相同 way 的独占形状点不当作转向 |
 
 环岛出口按经过节点是否存在可离开环岛的方向边计数，是基本结构语义；不提供复杂多车道环岛或完整的导航步骤归并。名称相同的直行段合并，所有步骤附几何索引和该段成本。复杂道路层叠和同位候选可能有歧义，真实导航应结合支持矩阵评估，不默认具备定位闭环。
 
-PBF 读取支持 raw/zlib 和普通/dense 节点，未知 required_features 或压缩拒绝。文件及累计解压各≤512 MiB，单 blob≤32 MiB，blob header≤64 KiB，节点/way/relation 总对象数≤2,000,000。另有 512 MiB 对象内容估算预算（非精确 RSS，单对象临时解析与容器开销另计）。这是有上限的全内存构建器；不适合全国级输入。无约束的原始对象保留仍可能产生明显的内存放大，部署应设置进程 RSS 配额。
+PBF 读取支持 raw/zlib 和普通/dense 节点，未知 required_features 或压缩拒绝。内存构建及 full/structure 预检限制文件及累计解压各≤512 MiB，单 blob≤32 MiB，blob header≤64 KiB，节点/way/relation 总对象数≤2,000,000；另有 512 MiB 对象内容估算预算（非精确 RSS，单对象临时解析与容器开销另计）。显式 external/v2 构建逐条暂存对象，使用独立的累计解码工作量预算，详见 [CLI 容量边界](cli.md#输入容量与资源边界)；输入、单块、图及查询仍有容量限制，尚不构成省域或 3 GiB 支持声明。部署应设置进程 RSS 配额。
 
 
 ## 限制形态及诊断
