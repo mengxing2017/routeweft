@@ -408,3 +408,100 @@ fn metadata_inspection_is_explicit_and_full_verification_still_detects_corruptio
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn binary_v2_cli_preserves_driving_results_and_v1_default() {
+    let root = temp("routeweft-v2-cli");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("fixture.pbf");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--dense", "--restriction-case", "valid"])
+        .status()
+        .unwrap()
+        .success());
+    let mut reference_report = Value::Null;
+    let mut reference_route = Value::Null;
+    let mut reference_nearest = Value::Null;
+    for format in [1, 2] {
+        let output = root.join(format!("dataset{format}"));
+        let mut args = vec![
+            "build",
+            "--input",
+            input.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--output",
+            output.to_str().unwrap(),
+        ];
+        if format == 2 {
+            args.extend(["--format", "2"]);
+        }
+        let (code, built) = command(&args);
+        assert_eq!(code, 0, "{built}");
+        assert_eq!(built["manifest"]["format"], format);
+        if format == 1 {
+            reference_report = built["report"].clone();
+        } else {
+            assert_eq!(reference_report, built["report"]);
+        }
+        let (code, verified) = command(&["verify", "--dataset", output.to_str().unwrap()]);
+        assert_eq!(code, 0);
+        assert_eq!(verified["verified"], true);
+        let (code, mut nearest) = command(&[
+            "nearest",
+            "--dataset",
+            output.to_str().unwrap(),
+            "--coordinate",
+            "0.0005,0",
+        ]);
+        assert_eq!(code, 0);
+        let nearest = nearest.as_object_mut().unwrap();
+        nearest.remove("dataset_id");
+        nearest.remove("format");
+        if format == 1 {
+            reference_nearest = Value::Object(nearest.clone());
+        } else {
+            assert_eq!(reference_nearest, Value::Object(nearest.clone()));
+        }
+        let (code, mut routed) = command(&[
+            "route",
+            "--dataset",
+            output.to_str().unwrap(),
+            "--coordinates",
+            "0,0;0.001,0",
+        ]);
+        assert_eq!(code, 0);
+        let route = routed["route"].as_object_mut().unwrap();
+        route.remove("dataset_id");
+        route.remove("format");
+        if format == 1 {
+            reference_route = Value::Object(route.clone());
+        } else {
+            assert_eq!(reference_route, Value::Object(route.clone()));
+        }
+    }
+    let (code, version) = command(&["version"]);
+    assert_eq!(code, 0);
+    assert_eq!(version["dataset_formats"], serde_json::json!([1, 2]));
+    assert_eq!(version["capabilities"]["external_memory_build"], false);
+    assert_eq!(version["capabilities"]["large_pbf_3gib"], false);
+    let bad = root.join("bad");
+    let (code, _) = command(&[
+        "build",
+        "--input",
+        input.to_str().unwrap(),
+        "--profile",
+        "driving",
+        "--output",
+        bad.to_str().unwrap(),
+        "--format",
+        "3",
+    ]);
+    assert_eq!(code, 2);
+    assert!(!bad.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
