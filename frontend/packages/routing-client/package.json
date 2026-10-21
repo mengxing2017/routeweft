@@ -1,0 +1,16 @@
+{
+  "name": "@routeweft/routing-client",
+  "version": "0.1.0",
+  "description": "Framework-independent RouteWeft routing interfaces and request coordination",
+  "type": "module",
+  "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md",
+  "files": ["dist", "README.md", "LICENSE.osrm-frontend", "THIRD_PARTY_NOTICES.md"],
+  "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {"typescript": "5.9.3"}
+}
