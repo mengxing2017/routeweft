@@ -63,6 +63,7 @@ cargo doc --manifest-path backend/Cargo.toml --workspace --no-deps --locked
 - [架构](docs/architecture.md)与 [ADR 0002](docs/adr-0002-dataset-and-routing.md)
 - [命名迁移](docs/migration.md)
 - [第三方来源与分发材料](THIRD_PARTY_NOTICES.md)
+- [公司私有 Cargo 发布与地址隔离](docs/private-release.md)
 
 CH/MLD、全国性能、跨数据集拼接、实时交通、骑行步行、完整车道引导和移动定位播报不在支持范围。数据集检查不提供来源签名或身份认证。
 
