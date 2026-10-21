@@ -7,4 +7,8 @@ public/api
 .qoder
 target/
 .codebuddy/
+__pycache__/
+*.pyc
+.private-release.env
+.private-release.env.local
 report
