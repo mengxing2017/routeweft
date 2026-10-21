@@ -53,7 +53,7 @@ cargo test --manifest-path backend/Cargo.toml --workspace --locked
 cargo doc --manifest-path backend/Cargo.toml --workspace --no-deps --locked
 ```
 
-端到端 fixture 使用 Python 3 标准库；许可清单检查需要 Python 3.11+（tomllib）。真实城市和持续负载基准是显式可选任务，不加入普通离线测试。见 [性能与复现](docs/performance.md)。前端仍为独立静态首页；本批次不新增地图业务页面或 HTTP 服务。
+端到端 fixture 使用 Python 3 标准库；许可清单检查需要 Python 3.11+（tomllib）。真实城市和持续负载基准是显式可选任务，不加入普通离线测试。见 [性能与复现](docs/performance.md)。前端保留独立静态首页，另提供可供下游复用的 [TypeScript 路由接口包](frontend/packages/routing-client/README.md)，不包含地图业务页面或 HTTP 服务。
 
 ## 文档和发布边界
 
