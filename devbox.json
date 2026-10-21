@@ -99,7 +99,9 @@
       "check-frontend": "make check-frontend",
       "release:check": "make release-check",
       "release:dry-run": "make release-dry-run",
-      "release:publish": "make release-publish"
+      "release:publish": "make release-publish",
+      "release:frontend:dry-run": "make release-frontend-dry-run",
+      "release:frontend:publish": "make release-frontend-publish"
     }
   }
 }

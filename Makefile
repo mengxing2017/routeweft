@@ -40,3 +40,11 @@ release-dry-run:
 
 release-publish:
 	python3 scripts/private-release.py release --execute
+
+.PHONY: release-frontend-dry-run release-frontend-publish
+
+release-frontend-dry-run:
+	python3 scripts/frontend-release.py
+
+release-frontend-publish:
+	python3 scripts/frontend-release.py --execute
