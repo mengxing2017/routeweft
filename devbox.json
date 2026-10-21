@@ -96,7 +96,10 @@
       "clippy": "cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings",
       "ci": "make check",
       "web": "pnpm --dir frontend dev",
-      "check-frontend": "make check-frontend"
+      "check-frontend": "make check-frontend",
+      "release:check": "make release-check",
+      "release:dry-run": "make release-dry-run",
+      "release:publish": "make release-publish"
     }
   }
 }

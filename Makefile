@@ -29,3 +29,14 @@ backend-dev:
 
 web-dev:
 	pnpm --dir frontend dev
+
+.PHONY: release-check release-dry-run release-publish
+
+release-check:
+	python3 scripts/private-release.py check
+
+release-dry-run:
+	python3 scripts/private-release.py release
+
+release-publish:
+	python3 scripts/private-release.py release --execute
