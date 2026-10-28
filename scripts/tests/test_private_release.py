@@ -13,6 +13,31 @@ spec.loader.exec_module(release)
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_load_local_config_without_overriding_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config'
+            path.write_text("# local config\nexport CARGO_REGISTRIES_INTERNAL_INDEX='https://internal.invalid/index'\nCARGO_REGISTRIES_INTERNAL_TOKEN='local-token' # comment\n")
+            with patch.dict(release.os.environ, {'CARGO_REGISTRIES_INTERNAL_TOKEN': 'existing'}, clear=True):
+                release.load_config(path)
+                self.assertEqual(release.os.environ['CARGO_REGISTRIES_INTERNAL_TOKEN'], 'existing')
+                self.assertEqual(release.rules(None), [b'internal.invalid'])
+
+    def test_config_values_are_not_executed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config'
+            marker = Path(directory) / 'executed'
+            value = f'$(touch {marker})'
+            path.write_text(f"CARGO_REGISTRIES_INTERNAL_TOKEN='{value}'\n")
+            with patch.dict(release.os.environ, {}, clear=True):
+                release.load_config(path)
+                self.assertEqual(release.os.environ['CARGO_REGISTRIES_INTERNAL_TOKEN'], value)
+            self.assertFalse(marker.exists())
+
+    def test_missing_index_has_actionable_error(self):
+        with patch.dict(release.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(release.ReleaseInputError, 'CARGO_REGISTRIES_INTERNAL_INDEX'):
+                release.rules(None)
+
     def test_default_rules_come_from_index(self):
         with patch.dict(release.os.environ, {
                 'CARGO_REGISTRIES_INTERNAL_INDEX': 'sparse+https://INTERNAL.invalid/index/'}, clear=True):
@@ -25,7 +50,7 @@ class ReleaseTests(unittest.TestCase):
                 patch.object(release, 'prepare') as prepare, \
                 patch.object(release, 'publish') as publish:
             release.release(Namespace(ref='HEAD', package=None, execute=False))
-            self.assertEqual([call.args[0].package for call in publish.call_args_list], list(release.ORDER))
+            self.assertEqual([call.args[0].package for call in publish.call_args_list], [None])
             self.assertTrue(all(not call.args[0].execute for call in publish.call_args_list))
             self.assertIsNone(prepare.call_args.args[0].license_file)
             self.assertFalse(prepare.call_args.args[0].output.parent.exists())
@@ -120,12 +145,98 @@ class ReleaseTests(unittest.TestCase):
                    'CARGO_REGISTRIES_INTERNAL_TOKEN': 'fixture-token'}
             args = Namespace(stage=stage, patterns=patterns, package='routeweft-domain', execute=True)
             with patch.dict(release.os.environ, env, clear=True), \
-                    patch.object(release.subprocess, 'run', return_value=Namespace(returncode=0)) as run, \
+                    patch.object(release, 'run_cargo') as run, \
                     patch.object(release, 'scan_archive', side_effect=ValueError('blocked')):
                 with self.assertRaises(ValueError):
                     release.publish(args)
                 self.assertEqual(run.call_count, 1)
                 self.assertIn('--dry-run', run.call_args.args[0])
+
+    def test_execute_retains_dependency_order(self):
+        env = {'CARGO_REGISTRIES_INTERNAL_INDEX': 'https://internal.invalid/index',
+               'CARGO_REGISTRIES_INTERNAL_TOKEN': 'fixture'}
+        with patch.dict(release.os.environ, env, clear=True), \
+                patch.object(release, 'prepare'), patch.object(release, 'publish') as publish:
+            release.release(Namespace(ref='HEAD', package=None, execute=True))
+        self.assertEqual([call.args[0].package for call in publish.call_args_list], list(release.ORDER))
+        self.assertTrue(all(call.args[0].execute for call in publish.call_args_list))
+
+    def test_unborn_head_has_actionable_error(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
+            with patch.object(release, 'ROOT', repo):
+                with self.assertRaisesRegex(release.ReleaseInputError, '先在本仓库提交'):
+                    release.resolve_commit('HEAD')
+                with self.assertRaisesRegex(release.ReleaseInputError, '--ref'):
+                    release.resolve_commit('missing-tag')
+
+    def test_package_archive_supports_cargo_layouts(self):
+        for layout in ('', 'tmp-crate', 'tmp-registry'):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                stage = Path(directory)
+                archive = stage / 'target/package' / layout / 'routeweft-domain-0.1.0.crate'
+                archive.parent.mkdir(parents=True)
+                archive.write_bytes(b'archive')
+                self.assertEqual(release.package_archive(stage, 'routeweft-domain', '0.1.0'), archive)
+
+    def test_inconsistent_archives_stop_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            for layout in ('tmp-crate', 'tmp-registry'):
+                archive = stage / 'target/package' / layout / 'routeweft-domain-0.1.0.crate'
+                archive.parent.mkdir(parents=True)
+                archive.write_text(layout)
+            with self.assertRaises(release.ReleaseInputError):
+                release.package_archive(stage, 'routeweft-domain', '0.1.0')
+
+    def test_cargo_failure_redacts_credentials_and_url(self):
+        import contextlib
+        import sys
+        output = io.StringIO()
+        env = {'CARGO_REGISTRIES_INTERNAL_TOKEN': 'private-token'}
+        command = [sys.executable, '-c',
+                   "print('error: private-token https://internal.invalid/index unavailable'); raise SystemExit(1)"]
+        with contextlib.redirect_stdout(output), self.assertRaises(release.ReleaseInputError):
+            release.run_cargo(command, Path('/tmp'), env)
+        self.assertNotIn('private-token', output.getvalue())
+        self.assertNotIn('internal.invalid', output.getvalue())
+        self.assertIn('unavailable', output.getvalue())
+
+    def test_live_output_and_silent_heartbeat(self):
+        import contextlib
+        import sys
+        output = io.StringIO()
+        command = [sys.executable, '-u', '-c',
+                   "import time; print('Compiling fixture'); time.sleep(0.2); print('Finished fixture')"]
+        with contextlib.redirect_stdout(output):
+            release.run_cargo(command, Path('/tmp'), {}, heartbeat_seconds=0.05)
+        value = output.getvalue()
+        self.assertLess(value.index('Compiling fixture'), value.index('仍在运行'))
+        self.assertLess(value.index('仍在运行'), value.index('Finished fixture'))
+
+    def test_workspace_dry_run_checks_every_archive_without_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            (stage / 'release-source.json').write_text(release.json.dumps({
+                'packages': list(release.ORDER), 'registry': 'internal', 'version': '0.1.0'}))
+            env = {'CARGO_REGISTRIES_INTERNAL_INDEX': 'https://internal.invalid/index',
+                   'CARGO_REGISTRIES_INTERNAL_TOKEN': 'fixture'}
+            args = Namespace(stage=stage, patterns=None, package=None, execute=False)
+            with patch.dict(release.os.environ, env, clear=True), \
+                    patch.object(release, 'run_cargo') as run, \
+                    patch.object(release, 'package_archive', return_value=stage / 'fixture.crate') as archive, \
+                    patch.object(release, 'scan_archive') as scan:
+                release.publish(args)
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0],
+                             ['cargo', 'publish', '--registry', 'internal', '--workspace', '--dry-run'])
+            self.assertEqual([call.args[1] for call in archive.call_args_list], list(release.ORDER))
+            self.assertEqual(scan.call_count, len(release.ORDER))
+            self.assertEqual(run.call_args.args[1], stage / 'backend')
+            self.assertEqual(archive.call_args.args[0], stage / 'backend')
+            self.assertEqual(run.call_args.args[2]['CARGO_TARGET_DIR'], str(stage / 'backend/target'))
 
 
 if __name__ == '__main__':
