@@ -6,7 +6,12 @@ import json
 import os
 from pathlib import Path
 import re
+import queue
+import signal
+import threading
+import time
 import shutil
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -18,16 +23,63 @@ ORDER = ('routeweft-domain', 'routeweft-dataset', 'routeweft-routing', 'routewef
 REPOSITORY = 'https://github.com/mengxing2017/routeweft'
 
 
+class ReleaseInputError(ValueError):
+    """Safe, actionable input error without private configuration."""
+
+
+def load_config(path=None):
+    """Read literal dotenv assignments without executing shell code."""
+    path = ROOT / '.private-release.env' if path is None else path
+    if not path.is_file():
+        return
+    allowed = {'CARGO_REGISTRIES_INTERNAL_INDEX', 'CARGO_REGISTRIES_INTERNAL_TOKEN',
+               'NPM_REGISTRY_INTERNAL', 'NPM_TOKEN_INTERNAL'}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition('=')
+        key = key.strip()
+        if not separator or key not in allowed:
+            raise ReleaseInputError(f'本地发布配置第 {number} 行格式无效；请使用示例中的变量赋值格式。')
+        try:
+            values = shlex.split(value, comments=True)
+        except ValueError:
+            raise ReleaseInputError(f'本地发布配置第 {number} 行引号不匹配。') from None
+        if len(values) > 1:
+            raise ReleaseInputError(f'本地发布配置第 {number} 行的值含空格，请使用引号。')
+        os.environ.setdefault(key, values[0] if values else '')
+
+
 def git(*args):
-    return subprocess.check_output(['git', '-C', str(ROOT), *args])
+    return subprocess.check_output(['git', '-C', str(ROOT), *args], stderr=subprocess.PIPE)
+
+
+def resolve_commit(ref):
+    try:
+        return git('rev-parse', '--verify', '--end-of-options', ref + '^{commit}').decode().strip()
+    except subprocess.CalledProcessError:
+        if ref == 'HEAD':
+            raise ReleaseInputError(
+                'HEAD 无法解析为提交。请先在本仓库提交待发布源码，再运行 make release-dry-run；'
+                '发布脚本不会自动提交，也不会包含未提交文件。') from None
+        raise ReleaseInputError(
+            '指定的 --ref 无法解析为提交，请检查 tag 或 commit 是否存在于本地仓库。') from None
 
 
 def rules(path):
     if path is None:
         index = os.environ.get('CARGO_REGISTRIES_INTERNAL_INDEX', '')
-        url = urlsplit(index.removeprefix('sparse+'))
+        if not index:
+            raise ReleaseInputError('缺少 CARGO_REGISTRIES_INTERNAL_INDEX；请填写仓库根目录的 .private-release.env 或导出环境变量。')
+        try:
+            url = urlsplit(index.removeprefix('sparse+'))
+        except ValueError:
+            raise ReleaseInputError('CARGO_REGISTRIES_INTERNAL_INDEX 格式无效；需要 HTTPS 或 sparse+HTTPS 索引地址。') from None
         if url.scheme != 'https' or not url.hostname or url.username or url.password:
-            raise ValueError('set CARGO_REGISTRIES_INTERNAL_INDEX to an HTTPS index')
+            raise ReleaseInputError('CARGO_REGISTRIES_INTERNAL_INDEX 必须是 HTTPS 或 sparse+HTTPS 索引地址，且不能内嵌凭据。')
         return [url.hostname.lower().encode()]
     values = [line.strip().lower().encode() for line in path.read_text().splitlines()
               if line.strip() and not line.lstrip().startswith('#')]
@@ -102,7 +154,7 @@ def prepare(args):
         raise ValueError('output must be a new directory outside the source repository')
     license_data = args.license_file.read_bytes() if args.license_file else b''
     inspect_bytes(license_data, patterns, 'project license')
-    commit = git('rev-parse', '--verify', args.ref + '^{commit}').decode().strip()
+    commit = resolve_commit(args.ref)
     archive_data = git('archive', commit, 'backend', 'LICENSES', 'THIRD_PARTY_NOTICES.md',
                        'docs/dependency-licenses.json', 'docs/data-sources.md')
     destination.mkdir(mode=0o700, parents=True)
@@ -247,7 +299,12 @@ def main():
     automatic.set_defaults(run=release)
     args = parser.parse_args()
     try:
+        load_config()
         args.run(args)
+    except KeyboardInterrupt:
+        parser.exit(130, '\n已取消发布操作，子进程已停止。\n')
+    except ReleaseInputError as error:
+        parser.exit(1, str(error) + '\n')
     except (ValueError, OSError, KeyError, tarfile.TarError, subprocess.CalledProcessError):
         # Exceptions can embed paths or private configuration; avoid printing their contents.
         parser.exit(1, 'Release operation failed; verify inputs and private staging configuration.\n')
