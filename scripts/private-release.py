@@ -220,6 +220,82 @@ def prepare(args):
     print('Private release staging prepared. Source repository was not modified.')
 
 
+def redact_output(output, env):
+    for key, value in env.items():
+        if value and any(word in key.upper() for word in ('TOKEN', 'PASSWORD', 'SECRET')):
+            output = output.replace(value, '<redacted>')
+    return re.sub(r'(?:sparse\+)?https?://[^\s<>"\']+', '<registry-url>', output)
+
+
+def run_cargo(command, stage, env, heartbeat_seconds=15):
+    started = time.monotonic()
+    print('Cargo 开始执行；实时日志已脱敏。', flush=True)
+    try:
+        process = subprocess.Popen(command, cwd=stage, env=env, start_new_session=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding='utf-8', errors='replace', bufsize=1)
+    except FileNotFoundError:
+        raise ReleaseInputError('找不到 cargo；请进入 devbox shell 后重试。') from None
+    lines = queue.Queue()
+
+    def read_output():
+        try:
+            for line in process.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    try:
+        while True:
+            try:
+                line = lines.get(timeout=heartbeat_seconds)
+            except queue.Empty:
+                elapsed = int(time.monotonic() - started)
+                print(f'Cargo 仍在运行（已用时 {elapsed}s，最近 {heartbeat_seconds}s 无新日志）；'
+                      '可按 Ctrl+C 取消。', flush=True)
+                continue
+            if line is None:
+                break
+            print(redact_output(line, env), end='', flush=True)
+        code = process.wait()
+    except BaseException:
+        # Cargo and its compiler children must stop before temporary files are removed.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        raise
+    finally:
+        reader.join(timeout=1)
+        process.stdout.close()
+    elapsed = int(time.monotonic() - started)
+    if code:
+        raise ReleaseInputError(f'Cargo 执行失败（退出码 {code}，用时 {elapsed}s），详见上方脱敏日志。')
+    print(f'Cargo 执行完成（用时 {elapsed}s）。', flush=True)
+
+
+def package_archive(stage, package, version):
+    directory = stage / 'target/package'
+    name = f'{package}-{version}.crate'
+    # Cargo versions differ: single-package output or workspace publish staging.
+    candidates = [directory / name, directory / 'tmp-crate' / name,
+                  directory / 'tmp-registry' / name]
+    found = [path for path in candidates if path.is_file()]
+    if not found:
+        raise ReleaseInputError('Cargo 返回成功，但未找到待检查的 .crate 归档。')
+    # Inspect every generated copy; do not silently accept inconsistent outputs.
+    if any(path.read_bytes() != found[0].read_bytes() for path in found[1:]):
+        raise ReleaseInputError('Cargo 生成了内容不一致的同名归档，已停止发布。')
+    return found[0]
+
+
 def publish(args):
     stage = args.stage.resolve()
     if stage.is_relative_to(ROOT):
@@ -231,41 +307,45 @@ def publish(args):
     if not index.startswith(('https://', 'sparse+https://')):
         raise ValueError('CARGO_REGISTRIES_INTERNAL_INDEX must specify an HTTPS index')
     if not os.environ.get('CARGO_REGISTRIES_INTERNAL_TOKEN'):
-        raise ValueError('CARGO_REGISTRIES_INTERNAL_TOKEN is required')
+        raise ReleaseInputError('缺少 CARGO_REGISTRIES_INTERNAL_TOKEN；请填写 .private-release.env 或导出环境变量。')
     patterns = rules(args.patterns)
     # Do not scan a resolved Cargo.lock: it intentionally contains private index data.
     for name in ORDER:
         scan_tree(stage / 'backend/crates' / name, patterns)
     # Run one package at a time. Caller waits for index visibility before proceeding.
-    command = ['cargo', 'publish', '--registry', 'internal', '-p', args.package]
+    if args.package is None and args.execute:
+        raise ReleaseInputError('整组入口只用于预演；正式上传必须逐包执行。')
+    selection = ['-p', args.package] if args.package else ['--workspace']
+    command = ['cargo', 'publish', '--registry', 'internal', *selection]
     env = os.environ.copy()
+    env['CARGO_TARGET_DIR'] = str(stage / 'backend/target')
     env['CARGO_REGISTRIES_INTERNAL_CREDENTIAL_PROVIDER'] = 'cargo:token'
     # Capture Cargo output: errors may contain the private URL or credentials.
-    result = subprocess.run([*command, '--dry-run'], cwd=stage / 'backend', env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if result.returncode:
-        raise ValueError('Cargo publish failed; output suppressed to protect private configuration')
-    archive = stage / 'backend/target/package' / f'{args.package}-{source["version"]}.crate'
-    if not archive.is_file():
-        raise ValueError('Cargo did not produce the expected archive')
-    scan_archive(archive, patterns, private_index=index)
+    run_cargo([*command, '--dry-run'], stage / 'backend', env)
+    for package in ([args.package] if args.package else ORDER):
+        archive = package_archive(stage / 'backend', package, source['version'])
+        scan_archive(archive, patterns, private_index=index)
     if args.execute:
-        result = subprocess.run(command, cwd=stage / 'backend', env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if result.returncode:
-            raise ValueError('Cargo upload failed; output suppressed')
+        run_cargo(command, stage / 'backend', env)
     print('Publish completed.' if args.execute else 'Publish dry-run completed.')
+    if args.package is None:
+        print('整组包构建及归档检查通过；未上传。包组内依赖由 Cargo 临时 registry 验证，'
+              '不代表远端 registry 已有这些版本。')
 
 
 def release(args):
     # Validate before preparing anything. Cargo uses the user's normal cache/config.
     rules(None)
     if not os.environ.get('CARGO_REGISTRIES_INTERNAL_TOKEN'):
-        raise ValueError('CARGO_REGISTRIES_INTERNAL_TOKEN is required')
+        raise ReleaseInputError('缺少 CARGO_REGISTRIES_INTERNAL_TOKEN；请填写 .private-release.env 或导出环境变量。')
     with tempfile.TemporaryDirectory(prefix='routeweft-release-') as temporary:
         stage = Path(temporary) / 'stage'
         prepare(argparse.Namespace(patterns=None, output=stage, ref=args.ref,
                                    license_file=None))
+        if not args.execute and not args.package:
+            print('Workspace: dry-run (no upload)', flush=True)
+            publish(argparse.Namespace(stage=stage, patterns=None, package=None, execute=False))
+            return
         for package in ([args.package] if args.package else ORDER):
             print(f'{package}: {"publish" if args.execute else "dry-run"}', flush=True)
             publish(argparse.Namespace(stage=stage, patterns=None, package=package,
