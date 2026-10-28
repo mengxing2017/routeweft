@@ -30,7 +30,7 @@ backend-dev:
 web-dev:
 	pnpm --dir frontend dev
 
-.PHONY: release-check release-dry-run release-publish
+.PHONY: release-check release-dry-run release-publish release-test
 
 release-check:
 	python3 scripts/private-release.py check
@@ -48,3 +48,6 @@ release-frontend-dry-run:
 
 release-frontend-publish:
 	python3 scripts/frontend-release.py --execute
+
+release-test:
+	python3 -m unittest discover -s scripts/tests -v

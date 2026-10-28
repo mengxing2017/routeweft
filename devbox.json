@@ -97,6 +97,7 @@
       "ci": "make check",
       "web": "pnpm --dir frontend dev",
       "check-frontend": "make check-frontend",
+      "release:test": "make release-test",
       "release:check": "make release-check",
       "release:dry-run": "make release-dry-run",
       "release:publish": "make release-publish",
