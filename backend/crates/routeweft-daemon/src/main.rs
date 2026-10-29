@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -125,6 +125,9 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--max-scratch-bytes",
             "--max-scratch-files",
             "--build-timeout-ms",
+            "--max-restriction-diagnostics",
+            "--max-restriction-audit-bytes",
+            "--max-blockways-attempts",
         ],
         "preflight" => &[
             "--input",
@@ -132,6 +135,9 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--invalid-restrictions",
             "--invalid-maxspeed",
             "--mode",
+            "--max-restriction-diagnostics",
+            "--max-restriction-audit-bytes",
+            "--max-blockways-attempts",
         ],
         "version" => &[],
         "inspect" => &["--dataset", "--mode", "--graph-capacity"],
@@ -239,6 +245,8 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                     "osm_work_bytes":routeweft_preprocess::pbf::STREAM_OBJECT_BYTES,
                     "decoded_bytes":routeweft_preprocess::pbf::STREAM_DECODED_BYTES,
                     "kind":"cumulative_work_not_retained_memory"},
+                "restriction_audit": {"default_records":4096,"max_records":32768,"default_bytes":16777216,
+                    "max_bytes":16777216,"memory_charge_bytes":67108864,"default_blockways_attempts":64,"max_blockways_attempts":257},
                 "memory_limit_kind":"estimated_objects_not_rss"
             }}),
         );
@@ -264,7 +272,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 diagnostics: None,
             });
         }
-        let options = routeweft_preprocess::BuildOptions {
+        let mut options = routeweft_preprocess::BuildOptions {
             invalid_maxspeed: match flags.get("--invalid-maxspeed").copied().unwrap_or("reject") {
                 "reject" => routeweft_preprocess::InvalidMaxspeedPolicy::Reject,
                 "use_default" => routeweft_preprocess::InvalidMaxspeedPolicy::UseDefault,
@@ -279,13 +287,43 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 "block_ways" => routeweft_preprocess::InvalidRestrictionPolicy::BlockWays,
                 _ => return Err(bad("invalid restriction policy; use reject or block_ways")),
             },
+            restriction_audit: Default::default(),
         };
+        if let Some(value) = flags.get("--max-restriction-diagnostics") {
+            options.restriction_audit.max_diagnostics = value
+                .parse()
+                .map_err(|_| bad("invalid --max-restriction-diagnostics"))?;
+        }
+        if let Some(value) = flags.get("--max-restriction-audit-bytes") {
+            options.restriction_audit.max_audit_bytes = value
+                .parse()
+                .map_err(|_| bad("invalid --max-restriction-audit-bytes"))?;
+        }
+        if let Some(value) = flags.get("--max-blockways-attempts") {
+            if options.invalid_restrictions
+                != routeweft_preprocess::InvalidRestrictionPolicy::BlockWays
+            {
+                return Err(bad(
+                    "--max-blockways-attempts requires --invalid-restrictions block_ways",
+                ));
+            }
+            options.restriction_audit.max_blockways_attempts = value
+                .parse()
+                .map_err(|_| bad("invalid --max-blockways-attempts"))?;
+        }
+        options
+            .restriction_audit
+            .validate()
+            .map_err(|_| bad("restriction audit limits out of range"))?;
         let input = Path::new(required("--input")?);
         if command == "preflight" {
             match flags.get("--mode").copied().unwrap_or("full") {
                 "structure" => {
                     if flags.contains_key("--invalid-restrictions")
                         || flags.contains_key("--invalid-maxspeed")
+                        || flags.contains_key("--max-restriction-diagnostics")
+                        || flags.contains_key("--max-restriction-audit-bytes")
+                        || flags.contains_key("--max-blockways-attempts")
                     {
                         return Err(bad("structure mode does not apply build policies"));
                     }
