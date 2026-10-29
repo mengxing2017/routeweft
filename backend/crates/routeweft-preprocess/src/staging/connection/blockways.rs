@@ -546,7 +546,8 @@ pub(crate) fn prepare_with_policy(
         error.report.nodes = report.nodes as usize;
         error.report.edges = report.edges as usize;
         error.report.diagnostics = report.diagnostics.clone();
-        error.report.restriction_diagnostics = report.restriction_diagnostics.clone();
+        error.report.restriction_diagnostics = std::mem::take(&mut report.restriction_diagnostics);
+        error.report.restriction_audit = report.restriction_audit.clone();
         error.report.blocked_way_ids = report.blocked_way_ids.clone();
         error.report.failure_code = Some("IntermediateWriteError".into());
         return Err(error);
@@ -560,6 +561,7 @@ mod tests {
     use super::super::tests::{source, temporary};
     use super::*;
     use crate::pbf::{Member, Node, Osm, Relation, Tags, Way};
+    use crate::staging::resolve_restrictions;
     use routeweft_dataset::{Graph, Point};
     use std::io::{BufRead, BufReader};
     fn fixture() -> Osm {
@@ -784,6 +786,246 @@ mod tests {
         fs::remove_dir_all(parent).unwrap();
     }
     #[test]
+    fn configured_count_boundary_and_final_allowed_round_match_memory() {
+        for count in [255, 256, 257] {
+            let parent = temporary();
+            let mut osm = fixture();
+            for id in 1..=count {
+                osm.relations.push(relation(
+                    id,
+                    "no_right_turn",
+                    &[(1, 20, "from"), (1, 40, "to")],
+                ));
+            }
+            let staged = source(&parent, &osm);
+            let limits = crate::RestrictionAuditLimits {
+                max_diagnostics: 256,
+                ..Default::default()
+            };
+            let options = BlockWaysOptions {
+                restriction: RestrictionOptions {
+                    audit: limits,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let error = prepare_with_policy(
+                &staged,
+                &parent.join("failed"),
+                options,
+                InvalidRestrictionPolicy::Reject,
+            )
+            .unwrap_err();
+            let memory = crate::prepare(
+                &osm,
+                crate::BuildOptions {
+                    restriction_audit: limits,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.report.restriction_audit,
+                memory.report.restriction_audit
+            );
+            assert_eq!(
+                error.report.restriction_diagnostics.len(),
+                count.min(256) as usize
+            );
+            assert_eq!(error.report.restriction_audit.truncated, count > 256);
+            assert_eq!(
+                error.report.failure_code.as_deref(),
+                Some(if count > 256 {
+                    "RestrictionAuditLimitExceeded"
+                } else {
+                    "InvalidRestriction"
+                })
+            );
+            fs::remove_dir_all(parent).unwrap();
+        }
+        let parent = temporary();
+        let osm = cascade();
+        let staged = source(&parent, &osm);
+        let options = BlockWaysOptions {
+            restriction: RestrictionOptions {
+                audit: crate::RestrictionAuditLimits {
+                    max_blockways_attempts: 3,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = prepare_block_ways(&staged, &parent.join("ready"), options).unwrap();
+        assert_eq!(report.attempts, 3);
+        let options = BlockWaysOptions {
+            restriction: RestrictionOptions {
+                audit: crate::RestrictionAuditLimits {
+                    max_blockways_attempts: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let error = prepare_block_ways(&staged, &parent.join("failed"), options).unwrap_err();
+        assert_eq!(error.report.restriction_audit.attempt, 2);
+        assert_eq!(
+            error.report.failure_code.as_deref(),
+            Some("BlockWaysAttemptLimitExceeded")
+        );
+        assert!(
+            matches!(error.source,routeweft_dataset::Error::ResourceLimit(ref r) if r.observed==3 && r.limit==2)
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn province_sized_audit_survives_reject_blocking_and_publication() {
+        let parent = temporary();
+        let mut osm = fixture();
+        for id in 1..=728 {
+            osm.relations.push(relation(
+                id,
+                "no_right_turn",
+                &[(1, 20, "from"), (1, 40, "to")],
+            ));
+        }
+        let staged = source(&parent, &osm);
+        let rejected = parent.join("rejected");
+        let disk = prepare_with_policy(
+            &staged,
+            &rejected,
+            Default::default(),
+            InvalidRestrictionPolicy::Reject,
+        )
+        .unwrap_err();
+        let memory = crate::prepare(&osm, Default::default()).unwrap_err();
+        assert_eq!(disk.report.restriction_diagnostics.len(), 728);
+        assert_eq!(disk.report.nodes, memory.report.nodes);
+        assert_eq!(disk.report.edges, memory.report.edges);
+        assert_eq!(
+            disk.report.restriction_audit,
+            memory.report.restriction_audit
+        );
+        assert!(disk.report.restriction_audit.scan_complete);
+        assert_eq!(
+            disk.report.failure_code.as_deref(),
+            Some("InvalidRestriction")
+        );
+        assert!(!rejected.exists());
+        let output = parent.join("ready");
+        let report = prepare_block_ways(&staged, &output, Default::default()).unwrap();
+        assert_eq!(report.format_version, 2);
+        assert_eq!(report.attempts, 2);
+        assert_eq!(report.restriction_diagnostics.len(), 728);
+        assert_eq!(report.blocked_way_ids, [20, 40]);
+        let published = crate::staging::publish_block_ways(
+            &output,
+            &parent.join("dataset"),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(published.input.restriction_audit.records_retained, 728);
+        routeweft_dataset::open(&parent.join("dataset"), Default::default()).unwrap();
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn audit_exhaustion_and_attempt_limits_never_trigger_partial_rebuilds() {
+        let parent = temporary();
+        let mut osm = fixture();
+        // Round one: 200 missing-via failures. Round two: 100 only exits now excluded.
+        for id in 1..=200 {
+            osm.relations.push(relation(
+                id,
+                "no_right_turn",
+                &[(1, 20, "from"), (1, 40, "to")],
+            ));
+        }
+        for id in 201..=300 {
+            osm.relations.push(relation(
+                id,
+                "only_straight_on",
+                &[(1, 10, "from"), (0, -1, "via"), (1, 20, "to")],
+            ));
+        }
+        let staged = source(&parent, &osm);
+        let options = BlockWaysOptions {
+            restriction: RestrictionOptions {
+                audit: crate::RestrictionAuditLimits {
+                    max_diagnostics: 256,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let error = prepare_block_ways(&staged, &parent.join("failed"), options).unwrap_err();
+        assert_eq!(error.report.restriction_diagnostics.len(), 256);
+        assert_eq!(error.report.restriction_audit.records_observed, 257);
+        assert_eq!(error.report.restriction_audit.attempt, 2);
+        assert_eq!(error.report.restriction_audit.attempts_completed, 1);
+        assert_eq!(error.report.blocked_way_ids, [20, 40]);
+        assert!(error.report.restriction_diagnostics[..200]
+            .iter()
+            .all(|d| d.action == "blocked_ways"));
+        assert!(error.report.restriction_diagnostics[200..]
+            .iter()
+            .all(|d| d.action == "rejected"));
+        let memory = crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+                restriction_audit: options.restriction.audit,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.report.restriction_audit,
+            memory.report.restriction_audit
+        );
+        let options = BlockWaysOptions {
+            restriction: RestrictionOptions {
+                audit: crate::RestrictionAuditLimits {
+                    max_blockways_attempts: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let error = prepare_block_ways(&staged, &parent.join("failed"), options).unwrap_err();
+        assert_eq!(
+            error.report.failure_code.as_deref(),
+            Some("BlockWaysAttemptLimitExceeded")
+        );
+        assert_eq!(error.report.restriction_diagnostics.len(), 200);
+        assert!(error.report.blocked_way_ids.is_empty());
+        assert!(error.report.restriction_audit.scan_complete);
+        assert!(!parent.join("failed").exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn larger_than_legacy_manifest_roundtrips_without_changing_child_limits() {
+        let parent = temporary();
+        let mut osm = fixture();
+        for id in 1..=100 {
+            let mut rel = relation(id, "no_right_turn", &[(1, 20, "from"), (1, 40, "to")]);
+            for tag in 0..30 {
+                rel.tags
+                    .insert(format!("restriction:extra{tag:02}"), "x".repeat(512));
+            }
+            osm.relations.push(rel);
+        }
+        let staged = source(&parent, &osm);
+        let output = parent.join("ready");
+        prepare_block_ways(&staged, &output, Default::default()).unwrap();
+        assert!(fs::metadata(output.join("manifest.json")).unwrap().len() > 1024 * 1024);
+        crate::staging::publish_block_ways(&output, &parent.join("dataset"), Default::default())
+            .unwrap();
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
     fn cascading_exclusions_rebuild_and_renumber_graph_with_matching_audit() {
         let parent = temporary();
         let osm = cascade();
@@ -958,6 +1200,15 @@ mod tests {
             let output = parent.join("failed");
             let error = prepare_block_ways(&staged, &output, options).unwrap_err();
             assert!(error.to_string().contains(resource), "{error}");
+            if matches!(
+                resource,
+                "blockways_blocked_ways" | "blockways_member_references"
+            ) {
+                assert!(error.report.nodes > 0);
+                assert!(error.report.edges > 0);
+                assert!(!error.report.diagnostics.is_empty());
+                assert!(!error.report.restriction_diagnostics.is_empty());
+            }
             assert!(!output.exists());
             assert!(!fs::read_dir(&parent).unwrap().any(|p| p
                 .unwrap()
@@ -968,7 +1219,7 @@ mod tests {
         fs::remove_dir_all(parent).unwrap();
     }
     #[test]
-    fn final_manifest_budget_failure_keeps_completed_blocking_audit() {
+    fn manifest_allowance_is_reserved_before_building_the_graph() {
         let parent = temporary();
         let mut osm = fixture();
         for id in 1..=70 {
@@ -992,13 +1243,10 @@ mod tests {
             ..Default::default()
         };
         let error = prepare_block_ways(&staged, &output, options).unwrap_err();
-        assert_eq!(
-            error.report.failure_code.as_deref(),
-            Some("IntermediateWriteError")
-        );
         assert!(error.to_string().contains("blockways_scratch_bytes"));
-        assert_eq!(error.report.restriction_diagnostics.len(), 70);
-        assert_eq!(error.report.blocked_way_ids, vec![20, 40]);
+        assert!(error.report.restriction_diagnostics.is_empty());
+        assert!(!error.report.restriction_audit.scan_complete);
+        assert!(error.report.blocked_way_ids.is_empty());
         assert!(!output.exists());
         assert!(!fs::read_dir(&parent).unwrap().any(|p| p
             .unwrap()
