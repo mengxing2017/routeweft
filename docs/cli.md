@@ -246,3 +246,11 @@ cargo test --release --manifest-path backend/Cargo.toml -p routeweft-daemon \
 ```
 
 该用例默认忽略，会执行完整省级外部构建，配置 scratch 16 GiB、协作式时限 3600 秒。通过条件是退出 4、明确阻塞于关系 5652903、完整保留 728 条审计、计划 185 条道路但已应用 0 条、无输出数据集且清理私有 scratch；这不是广东路网交付成功的验收。
+
+### 全量限制清查与显式隔离
+
+新增 `audit-restrictions`、`coverage` 以及 `--invalid-restrictions quarantine_ways`。政策范围、全量清查输出、覆盖检查和省级操作见 [限制关系政策](restriction-policies.md)。旧 `reject`、`block_ways` 行为保持原契约。新模式不会补造空 role、忽略未知依赖或把条件限制改为全天限制。
+
+`customize` 的 `--max-index-bytes` 独立控制逻辑索引工作区，默认 2 GiB；`--max-load-bytes` 控制数据加载估算。可显式配置 `--levels`（1..4，默认 3）、`--max-boundary`（1..1024，默认 128）、`--max-shortcuts`（默认 20000000）。边界过多的 cell 会保守回退低层图，较小索引并不保证省级查询能在默认工作量内完成。提高层数/边界上限会增加离线定制时间、索引体积和加载内存，必须以完整查询证据验证；这与提高查询 deadline/work budget 不同。
+
+路径返回前会重放解包后的原始边、限制状态及总成本，诊断新增 `validated_route_edges`。`coverage --excluded-ways FILE.json` 要求升序唯一的 way ID 数组（文件最多 4 MiB），返回实际残留边数；不能用诊断的 planned 数量代替这项检查。
