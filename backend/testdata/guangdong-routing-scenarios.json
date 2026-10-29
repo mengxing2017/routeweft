@@ -1,0 +1,309 @@
+{
+  "description": "Fixed approximate city anchors, snapped against the actual map. Groups use returned road distances. All failures retained.",
+  "anchors": {
+    "Guangzhou": [
+      113.2644,
+      23.1291
+    ],
+    "Shenzhen": [
+      114.0579,
+      22.5431
+    ],
+    "Foshan": [
+      113.1214,
+      23.0215
+    ],
+    "Dongguan": [
+      113.7518,
+      23.0207
+    ],
+    "Zhuhai": [
+      113.5767,
+      22.2707
+    ],
+    "Zhongshan": [
+      113.3928,
+      22.5176
+    ],
+    "Huizhou": [
+      114.4168,
+      23.1123
+    ],
+    "Zhaoqing": [
+      112.4651,
+      23.0472
+    ],
+    "Jiangmen": [
+      113.0819,
+      22.5787
+    ],
+    "Shantou": [
+      116.6822,
+      23.3535
+    ],
+    "Zhanjiang": [
+      110.3594,
+      21.2707
+    ],
+    "Shaoguan": [
+      113.5975,
+      24.8104
+    ],
+    "Meizhou": [
+      116.1222,
+      24.2886
+    ],
+    "Yangjiang": [
+      111.9822,
+      21.8579
+    ],
+    "GuangzhouLocal": [
+      113.3244,
+      23.1441
+    ],
+    "ShenzhenLocal": [
+      114.1179,
+      22.5581
+    ],
+    "DongguanLocal": [
+      113.8118,
+      23.035700000000002
+    ],
+    "FoshanLocal": [
+      113.1814,
+      23.0365
+    ],
+    "ZhuhaiLocal": [
+      113.6367,
+      22.285700000000002
+    ]
+  },
+  "core_cities": [
+    "Shenzhen",
+    "Foshan",
+    "Dongguan",
+    "Zhuhai",
+    "Huizhou",
+    "Zhaoqing",
+    "Jiangmen",
+    "Shantou",
+    "Zhanjiang",
+    "Shaoguan",
+    "Meizhou"
+  ],
+  "jitter_degrees": [
+    [
+      -0.01,
+      -0.01
+    ],
+    [
+      -0.01,
+      0
+    ],
+    [
+      -0.01,
+      0.01
+    ],
+    [
+      0,
+      -0.01
+    ],
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      0.01
+    ],
+    [
+      0.01,
+      -0.01
+    ],
+    [
+      0.01,
+      0
+    ],
+    [
+      0.01,
+      0.01
+    ]
+  ],
+  "seeds": [
+    {
+      "id": "Zhuhai-ZhuhaiLocal",
+      "anchors": [
+        "Zhuhai",
+        "ZhuhaiLocal"
+      ]
+    },
+    {
+      "id": "Foshan-FoshanLocal",
+      "anchors": [
+        "Foshan",
+        "FoshanLocal"
+      ]
+    },
+    {
+      "id": "Dongguan-DongguanLocal",
+      "anchors": [
+        "Dongguan",
+        "DongguanLocal"
+      ]
+    },
+    {
+      "id": "Shenzhen-ShenzhenLocal",
+      "anchors": [
+        "Shenzhen",
+        "ShenzhenLocal"
+      ]
+    },
+    {
+      "id": "Guangzhou-GuangzhouLocal",
+      "anchors": [
+        "Guangzhou",
+        "GuangzhouLocal"
+      ]
+    },
+    {
+      "id": "Guangzhou-Foshan",
+      "anchors": [
+        "Guangzhou",
+        "Foshan"
+      ]
+    },
+    {
+      "id": "Guangzhou-Dongguan",
+      "anchors": [
+        "Guangzhou",
+        "Dongguan"
+      ]
+    },
+    {
+      "id": "Foshan-Jiangmen",
+      "anchors": [
+        "Foshan",
+        "Jiangmen"
+      ]
+    },
+    {
+      "id": "Zhongshan-Jiangmen",
+      "anchors": [
+        "Zhongshan",
+        "Jiangmen"
+      ]
+    },
+    {
+      "id": "Dongguan-Huizhou",
+      "anchors": [
+        "Dongguan",
+        "Huizhou"
+      ]
+    },
+    {
+      "id": "Guangzhou-Zhuhai",
+      "anchors": [
+        "Guangzhou",
+        "Zhuhai"
+      ]
+    },
+    {
+      "id": "Guangzhou-Shenzhen",
+      "anchors": [
+        "Guangzhou",
+        "Shenzhen"
+      ]
+    },
+    {
+      "id": "Foshan-Zhongshan",
+      "anchors": [
+        "Foshan",
+        "Zhongshan"
+      ]
+    },
+    {
+      "id": "Foshan-Huizhou",
+      "anchors": [
+        "Foshan",
+        "Huizhou"
+      ]
+    },
+    {
+      "id": "Dongguan-Zhuhai",
+      "anchors": [
+        "Dongguan",
+        "Zhuhai"
+      ]
+    },
+    {
+      "id": "Guangzhou-Shaoguan",
+      "anchors": [
+        "Guangzhou",
+        "Shaoguan"
+      ]
+    },
+    {
+      "id": "Guangzhou-Meizhou",
+      "anchors": [
+        "Guangzhou",
+        "Meizhou"
+      ]
+    },
+    {
+      "id": "Shenzhen-Shantou",
+      "anchors": [
+        "Shenzhen",
+        "Shantou"
+      ]
+    },
+    {
+      "id": "Guangzhou-Yangjiang",
+      "anchors": [
+        "Guangzhou",
+        "Yangjiang"
+      ]
+    },
+    {
+      "id": "Huizhou-Meizhou",
+      "anchors": [
+        "Huizhou",
+        "Meizhou"
+      ]
+    },
+    {
+      "id": "Guangzhou-Zhanjiang",
+      "anchors": [
+        "Guangzhou",
+        "Zhanjiang"
+      ]
+    },
+    {
+      "id": "Shenzhen-Zhanjiang",
+      "anchors": [
+        "Shenzhen",
+        "Zhanjiang"
+      ]
+    },
+    {
+      "id": "Zhuhai-Shantou",
+      "anchors": [
+        "Zhuhai",
+        "Shantou"
+      ]
+    },
+    {
+      "id": "Foshan-Shantou",
+      "anchors": [
+        "Foshan",
+        "Shantou"
+      ]
+    },
+    {
+      "id": "Zhanjiang-Huizhou",
+      "anchors": [
+        "Zhanjiang",
+        "Huizhou"
+      ]
+    }
+  ]
+}
