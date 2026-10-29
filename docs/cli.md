@@ -179,7 +179,7 @@ build/preflight 接受 `--invalid-restrictions reject|block_ways`，默认 rejec
 
 使用 `error.details.restriction_diagnostics[].code` 分型，不解析人类可读 message。稳定分类包括 MissingVia、MissingFromTo、MissingReference、InvalidMemberType、UnsupportedMultiplicity、UnsupportedViaShape、UnsupportedRestriction、UnresolvedRestriction、RestrictionLimitExceeded；含义见 [profile](driving-profile.md)。PBF 解码错误使用 details.failure_code=PbfReadError，其他图校验错误为 GraphValidationError；读取前的文件错误为 InputReadError，数据集写入失败为 DatasetWriteError；底层 kind/退出码仍保留原契约。早于读取的 IO/限额失败可能没有来源身份或完整诊断。
 
-诊断最多保留 256 条，否则预算失败；每条最多 256 个成员，超出时 members_truncated=true。诊断标签最多 32 项，键/值最多 128/512 字符，role 最多 64 字符；完整源信息仍需检查原始 PBF。报告是有界诊断，不是完整 OSM 原件的副本。
+诊断默认累计最多保留 4,096 条，并受下述字节与逻辑内存预算约束；每条最多 256 个成员，超出时 members_truncated=true。诊断标签最多 32 项，键/值最多 128/512 字符，role 最多 64 字符；完整源信息仍需检查原始 PBF。报告是有界诊断，不是完整 OSM 原件的副本。
 
 只有经过审核后才显式启用：
 
@@ -197,3 +197,31 @@ block_ways 排除无效关系中已存在的全部 way 成员，并迭代复核�
 external 的流水线、源文件复核及发布错误也保留 `error.details`；通用 failure_code 为 ExternalBuildError，最终数据集写入为 DatasetPublicationError，输入变化为 SourceChanged，阶段截止/取消为 BuildTimeout/BuildCancelled。静态限制仍使用 InvalidRestriction 及关系级诊断。早期失败可能尚无来源摘要；各阶段资源错误按 error.resource 分型。源关系按 ID 排序处理，未排序 PBF 的诊断列表次序可能与内存模式不同，关系身份与处理策略保持。
 
 2026-10-29 算法升级：加速文件为 `RWFTML02`，旧 `RWFTML01` 需重新执行 customize；基础地图不需重新导入。auto 使用双向限制状态查询、图割分区与度二链压缩。route 的小分量替代吸附受原吸附半径约束，并通过 diagnostics.snap_fallbacks 报告；nearest 返回实际最近候选。完整语义与资源上限见[加速指南](routing-acceleration.md)。
+
+### 转向限制审计预算
+
+build 和 full preflight 接受以下预算；structure 预检拒绝这些参数。默认审计可保留超过 256 条异常，但仍有条数、序列化字节和保守逻辑内存三重边界：
+
+| 参数 | 默认 | 有效范围 |
+| --- | ---: | --- |
+| `--max-restriction-diagnostics` | 4096 | 1～32768，跨轮次累计记录数 |
+| `--max-restriction-audit-bytes` | 16777216 | 1～16777216 字节，包含可能改为 blocked_ways 的预留 |
+| `--max-blockways-attempts` | 64 | 1～257，仅显式 block_ways；包括首次构图 |
+
+内存审计另有固定 64 MiB 保守对象收费，均不是进程 RSS 限制。条数、字节不能设置为 0；非法配置在读取 PBF 前失败。仅最后一轮仍需重建时才触发轮次超限，不会启动被禁止的下一轮。单条关系的成员展示、路径长度、搜索和访问预算不随审计数量增加而改变。
+
+超限返回退出码 4 / BudgetExceeded，`error.resource` 包含 `restriction_audit_records`、`restriction_audit_bytes`、`restriction_audit_memory_bytes` 或 `blockways_attempts`，以及 limit、observed、stage。failure_code 为 RestrictionAuditLimitExceeded 或 BlockWaysAttemptLimitExceeded，不再因诊断列表溢出而丢弃已收集关系。关系扫描中其他资源/读取错误同样保留已收集的审计。
+
+`error.details.restriction_audit`（成功时为 report.restriction_audit）包含 records_observed、records_retained、retained_bytes、retained_memory_bytes、scan_complete、truncated、attempt、attempts_completed 和 limits。observed 是已发现失败事件的数量，跨轮次不保证唯一；scan_complete=false 时只是下界，不能解释为整个输入的异常总数。每条诊断新增 attempt，标明发现轮次。members_truncated 仅表示单条关系展示成员截断，与完整关系列表的 truncated 不同。只有完整的 InvalidRestriction 列表才允许 BlockWays 排除重建；有部分诊断的预算错误仍停止。
+
+BlockWays 中间审计 manifest 写入版本 2，固定最大 32 MiB，读取器仍兼容旧版本 1（1 MiB/256 条）。该大小与子阶段元数据预留计入 scratch；预算不足可能在构图前失败。connection/edges/adjacency 等 child manifest 仍是 1 MiB，最终路网二进制格式不变。调用者应保存成功报告中的排除审计。
+
+```bash
+routeweft build --input region.osm.pbf --profile driving --builder external --format 2 \
+  --graph-capacity regional --invalid-restrictions block_ways --invalid-maxspeed use_default \
+  --max-restriction-diagnostics 4096 --max-restriction-audit-bytes 16777216 \
+  --max-blockways-attempts 64 --scratch-dir ./scratch --max-scratch-bytes 21474836480 \
+  --max-scratch-files 4096 --output ./new-regional-dataset --json > build-result.json
+```
+
+足够的首轮审计容量不代表所有级联轮次可完成，也不代表排除后的路网质量达标。先验证、再抽样路线；不对缺失 via 或不支持的关系推断合法运动。省级输入应运行 regional/external build，不能用仍受内存对象/城市跨度限制的 full preflight 判断可构建性。
