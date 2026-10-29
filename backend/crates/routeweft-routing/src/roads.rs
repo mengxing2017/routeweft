@@ -132,6 +132,18 @@ pub struct RouteResult {
     pub steps: Vec<Step>,
     pub snapped: Vec<Point>,
 }
+/// Physical directed connectivity; turn-state reachability still needs queries.
+#[derive(Debug, Serialize)]
+pub struct CoverageInfo {
+    pub nodes: usize,
+    pub edges: usize,
+    pub directed_distance_m: f64,
+    pub weak_components: usize,
+    pub largest_weak_nodes: usize,
+    pub strong_components: usize,
+    pub largest_strong_nodes: usize,
+    pub excluded_way_edges: usize,
+}
 /// Immutable versioned dataset, spatial index and restriction automaton.
 /// Each query owns its queue, overlay and cancellation/working-state budget.
 pub struct Engine {
@@ -303,6 +315,35 @@ impl Engine {
         self.compression.set_boundaries(&self.graph, &index);
         self.acceleration = Some(index);
         Ok(info)
+    }
+    /// `excluded` must be strictly sorted. Coverage inspection never changes routing.
+    pub fn coverage(&self, excluded: &[i64]) -> Result<CoverageInfo, Error> {
+        if excluded.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(Error::InvalidInput);
+        }
+        let mut distance = 0u64;
+        let mut remaining = 0;
+        for edge in &self.graph.edges {
+            distance = distance
+                .checked_add(edge.distance_mm)
+                .ok_or(Error::CostOverflow)?;
+            remaining += excluded.binary_search(&edge.way).is_ok() as usize;
+        }
+        Ok(CoverageInfo {
+            nodes: self.graph.nodes.len(),
+            edges: self.graph.edges.len(),
+            directed_distance_m: distance as f64 / 1000.,
+            weak_components: self.components.size.len(),
+            largest_weak_nodes: self
+                .components
+                .size
+                .get(self.components.largest as usize)
+                .copied()
+                .unwrap_or(0),
+            strong_components: self.components.strong_count,
+            largest_strong_nodes: self.components.largest_strong_size,
+            excluded_way_edges: remaining,
+        })
     }
     pub fn acceleration_info(&self) -> Option<AccelerationInfo> {
         self.acceleration.as_ref().map(Index::info)

@@ -8,6 +8,7 @@ pub(super) struct Components {
     pub size: Vec<usize>,
     pub largest: u32,
     pub strong_count: usize,
+    pub largest_strong_size: usize,
 }
 impl Components {
     pub fn new(g: &Graph, out: &Adjacency, incoming: &Rows) -> Self {
@@ -36,6 +37,7 @@ impl Components {
         }
         seen.fill(false);
         let mut strong_count = 0;
+        let mut largest_strong_size = 0;
         for &start in order.iter().rev() {
             if seen[start] {
                 continue;
@@ -43,7 +45,9 @@ impl Components {
             strong_count += 1;
             seen[start] = true;
             let mut stack = vec![start];
+            let mut strong_size = 0;
             while let Some(v) = stack.pop() {
+                strong_size += 1;
                 for &id in &incoming[v] {
                     let from = g.edges[id].from;
                     if !seen[from] {
@@ -52,6 +56,7 @@ impl Components {
                     }
                 }
             }
+            largest_strong_size = largest_strong_size.max(strong_size);
         }
         let mut weak = vec![u32::MAX; n];
         let mut size = Vec::new();
@@ -89,6 +94,7 @@ impl Components {
             size,
             largest,
             strong_count,
+            largest_strong_size,
         }
     }
 }

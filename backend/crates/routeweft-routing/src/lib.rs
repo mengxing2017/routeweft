@@ -230,4 +230,6 @@ impl NodeEngine {
 
 mod roads;
 mod topology;
-pub use roads::{Engine, Leg, LoadDiagnostics, Nearest, QueryOptions, RouteResult, Step};
+pub use roads::{
+    CoverageInfo, Engine, Leg, LoadDiagnostics, Nearest, QueryOptions, RouteResult, Step,
+};
