@@ -149,10 +149,20 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         ],
         "version" => &[],
         "inspect" => &["--dataset", "--mode", "--graph-capacity"],
+        "coverage" => &[
+            "--dataset",
+            "--graph-capacity",
+            "--max-load-bytes",
+            "--excluded-ways",
+        ],
         "customize" => &[
             "--dataset",
             "--graph-capacity",
             "--max-load-bytes",
+            "--max-index-bytes",
+            "--levels",
+            "--max-boundary",
+            "--max-shortcuts",
             "--max-work",
             "--timeout-ms",
         ],
@@ -547,8 +557,20 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             .unwrap_or(Ok(default))
     };
     if command == "customize" {
+        let metadata =
+            routeweft_dataset::inspect_manifest(dataset, load_limits).map_err(data_error)?;
+        // Keep the structured engine-load resource error instead of collapsing
+        // a known resident allocation limit into an unqualified BudgetExceeded.
+        routeweft_dataset::check_resident_budget(&metadata, load_limits, true)
+            .map_err(data_error)?;
         let timeout = number("--timeout-ms", 1_800_000)?;
         let options = CustomizationOptions {
+            levels: usize::try_from(number("--levels", 3)?).map_err(|_| bad("levels"))?,
+            max_boundary: usize::try_from(number("--max-boundary", 128)?)
+                .map_err(|_| bad("boundary limit"))?,
+            max_shortcuts: usize::try_from(number("--max-shortcuts", 20_000_000)?)
+                .map_err(|_| bad("shortcut limit"))?,
+            max_bytes: number("--max-index-bytes", 2 * 1024 * 1024 * 1024)?,
             max_work: usize::try_from(number("--max-work", 2_000_000_000)?)
                 .map_err(|_| bad("work limit"))?,
             deadline: Some(
