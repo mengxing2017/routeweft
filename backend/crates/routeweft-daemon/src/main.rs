@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways|quarantine_ways] [--json]\nrouteweft audit-restrictions --input FILE.osm.pbf --output DIR [--max-memory-bytes N] [--json]\nrouteweft coverage --dataset DIR [--excluded-ways FILE.json] [load limits]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N] [--max-index-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways|quarantine_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways/quarantine_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -105,6 +105,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             | "version"
             | "inspect"
             | "verify"
+            | "coverage"
             | "nearest"
             | "route"
             | "customize"
@@ -237,7 +238,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
             "build":serde_json::from_str::<Value>(include_str!(concat!(env!("OUT_DIR"), "/build-identity.json"))).expect("build identity"),
             "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
-            "commands":["build","audit-restrictions","preflight","inspect","verify","nearest","route","customize","serve","version"],
+            "commands":["build","audit-restrictions","preflight","inspect","verify","coverage","nearest","route","customize","serve","version"],
             "invalid_restriction_policies":["reject","block_ways","quarantine_ways"],
             "invalid_maxspeed_policies":["reject","use_default"],
             "capabilities": {
@@ -592,6 +593,28 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     let engine =
         Engine::open_with_capacity(dataset, load_limits, graph_capacity).map_err(query_error)?;
     let load_ms = load.elapsed().as_secs_f64() * 1000.;
+    if command == "coverage" {
+        let excluded: Vec<i64> = if let Some(path) = flags.get("--excluded-ways") {
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .map_err(|e| data_error(e.into()))?
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| data_error(e.into()))?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                return Err(bad("excluded way list too large"));
+            }
+            serde_json::from_slice(&bytes)
+                .map_err(|_| bad("excluded ways must be a sorted JSON integer array"))?
+        } else {
+            Vec::new()
+        };
+        let coverage = engine.coverage(&excluded).map_err(query_error)?;
+        return Ok(
+            json!({"schema":1,"status":"ok","dataset_id":metadata.dataset_id,
+            "coverage":coverage,"load_ms":load_ms,"load_diagnostics":engine.load_diagnostics()}),
+        );
+    }
     let algorithm = match flags.get("--algorithm").copied().unwrap_or("auto") {
         "auto" => RoutingAlgorithm::Auto,
         "dijkstra" => RoutingAlgorithm::Dijkstra,
