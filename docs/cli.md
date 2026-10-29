@@ -196,6 +196,11 @@ block_ways 排除无效关系中已存在的全部 way 成员，并迭代复核�
 
 成功 build 新增 report 字段，包含 policy、source_sha256/source_snapshot、最终节点/边/禁止序列数量、计数、逐关系审计和 blocked_way_ids。preflight/build 的 report.valid=true 表示在所选策略下图校验通过，允许同时存在 action=blocked_ways 的告警。失败报告中的节点/边数可能仅反映失败尝试，不是有效成品。
 
+`planned_blocked_way_ids` 是已计算的排除计划；`applied_blocked_way_ids` 是最近一次已完成节点/边构建实际使用的集合，不保证限制校验或最终发布成功。旧 `blocked_way_ids` 保持为计划集合的兼容别名。第一轮处理到不可恢复关系时，可出现计划非空、已应用为空。`action=blocked_ways` 仍表示该条诊断进入计划，不能据此发布。
+
+保守排除无法继续时，`blockways_failure` 明确提供 `relation_id`、`attempt`、`reason`、`recoverable=false` 及原始角色的有界成员摘要。reason 为 `NoSafeFromToMember`（无 from/to way）、`ReferencedWayAbsent`（from/to way 均不在输入中）或 `NoNewExclusions`（不能增加排除）。原有 `failure_code=InvalidRestriction` 和审计编码保持兼容。工具不推断空角色、不跳过限制；例如广东关系 5652903 两个 way 成员角色均为空时，仍拒绝且不发布数据集。
+
+
 完整审计位于 CLI report，不新增 dataset v1 必需字段。请保存 build-result.json 并随构建回执分发；manifest.diagnostics 只保存计数，不包含关系级完整审计。库调用者使用 build_with_options/prepare/preflight 及结构化 Error.report；默认 build/graph 仍严格拒绝。
 
 external 的流水线、源文件复核及发布错误也保留 `error.details`；通用 failure_code 为 ExternalBuildError，最终数据集写入为 DatasetPublicationError，输入变化为 SourceChanged，阶段截止/取消为 BuildTimeout/BuildCancelled。静态限制仍使用 InvalidRestriction 及关系级诊断。早期失败可能尚无来源摘要；各阶段资源错误按 error.resource 分型。源关系按 ID 排序处理，未排序 PBF 的诊断列表次序可能与内存模式不同，关系身份与处理策略保持。
