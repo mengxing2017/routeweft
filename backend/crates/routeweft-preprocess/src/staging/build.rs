@@ -1,6 +1,6 @@
 //! Explicit bounded external v2 build coordinator. No resident Osm or Graph.
 use super::{
-    connection::prepare_with_policy, publish_block_ways, stage, BlockWaysOptions,
+    connection::prepare_with_policy, publish_block_ways, stage, BlockWaysOptions, BuildProgress,
     RestrictionOptions, StageOptions,
 };
 use crate::{BuildOptions, Error, InputReport, Result};
@@ -236,8 +236,16 @@ fn run(
         maxspeed_policy: options.build.invalid_maxspeed,
         ..Default::default()
     };
+    let build_started = Instant::now();
+    let mut staging_ms = 0;
     let result = (|| {
         checkpoint(Phase::Staging)?;
+        options.stage.observe(BuildProgress {
+            stage: "staging",
+            scratch_scope: "build_checkpoints",
+            cancellation_checkpoint: true,
+            ..Default::default()
+        });
         // Stage budgets runs, not its completion manifest. Reserve its fixed bound.
         const METADATA: u64 = 1024 * 1024;
         owned.observe(METADATA, 2)?;
@@ -258,6 +266,7 @@ fn run(
                 .ok_or_else(|| invalid("staging peak overflow"))?,
             0,
         )?;
+        staging_ms = build_started.elapsed().as_millis() as u64;
         context.source_sha256 = staged_report.source_sha256.clone();
         context.source_snapshot = staged_report.source_snapshot;
         for (key, count) in ["input_nodes", "input_ways", "input_relations"]
@@ -268,6 +277,14 @@ fn run(
         }
         let (remaining_bytes, remaining_files, retained) = owned.remaining()?;
         checkpoint(Phase::Graph)?;
+        options.stage.observe(BuildProgress {
+            stage: "staging_complete",
+            completed: staged_report.counts.iter().sum(),
+            scratch_peak_bytes: owned.peak,
+            scratch_scope: "build_checkpoints",
+            cancellation_checkpoint: true,
+            ..Default::default()
+        });
         let prepared = owned.root.join("prepared");
         let graph = prepare_with_policy(
             &staged,
@@ -300,8 +317,12 @@ fn run(
             edges: graph.edges as usize,
             restrictions: graph.restrictions as usize,
             diagnostics: graph.diagnostics,
+            build_metrics: graph.build_metrics,
             restriction_diagnostics: graph.restriction_diagnostics,
             restriction_audit: graph.restriction_audit,
+            planned_blocked_way_ids: graph.blocked_way_ids.clone(),
+            applied_blocked_way_ids: graph.blocked_way_ids.clone(),
+            blockways_failure: None,
             blocked_way_ids: graph.blocked_way_ids,
         };
         owned.observe(
@@ -321,6 +342,15 @@ fn run(
             .into());
         }
         checkpoint(Phase::Publication)?;
+        options.stage.observe(BuildProgress {
+            stage: "publication",
+            attempt: graph.attempts,
+            diagnostics_observed: context.restriction_audit.records_observed,
+            scratch_peak_bytes: owned.peak,
+            scratch_scope: "build_checkpoints",
+            cancellation_checkpoint: true,
+            ..Default::default()
+        });
         let final_dataset = owned.root.join("dataset");
         let publication = publish_block_ways(
             &prepared,
@@ -333,6 +363,15 @@ fn run(
         )?;
         owned.remaining()?;
         checkpoint(Phase::Commit)?;
+        options.stage.observe(BuildProgress {
+            stage: "commit",
+            attempt: graph.attempts,
+            diagnostics_observed: context.restriction_audit.records_observed,
+            scratch_peak_bytes: owned.peak,
+            scratch_scope: "build_checkpoints",
+            cancellation_checkpoint: true,
+            ..Default::default()
+        });
         if fs::metadata(input)?.len() > 512 * 1024 * 1024
             || hash_file(input)? != context.source_sha256
         {
@@ -350,6 +389,20 @@ fn run(
         File::open(parent)?.sync_all()?;
         let mut report = publication.input;
         report.valid = true;
+        report.build_metrics.insert("staging_ms".into(), staging_ms);
+        report.build_metrics.insert(
+            "total_elapsed_ms".into(),
+            build_started.elapsed().as_millis() as u64,
+        );
+        options.stage.observe(BuildProgress {
+            stage: "complete",
+            attempt: graph.attempts,
+            completed: report.edges as u64,
+            diagnostics_observed: report.restriction_audit.records_observed,
+            scratch_peak_bytes: owned.peak,
+            scratch_scope: "build_checkpoints",
+            ..Default::default()
+        });
         Ok(ExternalBuildResult {
             manifest: publication.manifest,
             report,
@@ -364,6 +417,14 @@ fn run(
         })
     })();
     result.map_err(|mut error: Error| {
+        error
+            .report
+            .build_metrics
+            .insert("staging_ms".into(), staging_ms);
+        error.report.build_metrics.insert(
+            "total_elapsed_ms".into(),
+            build_started.elapsed().as_millis() as u64,
+        );
         error.report.valid = false;
         error.report.policy = options.build.invalid_restrictions;
         error.report.maxspeed_policy = options.build.invalid_maxspeed;
@@ -391,8 +452,13 @@ fn run(
         if error.report.restriction_diagnostics.is_empty() {
             error.report.restriction_diagnostics = context.restriction_diagnostics;
         }
+        for (key, value) in context.build_metrics {
+            error.report.build_metrics.entry(key).or_insert(value);
+        }
         if error.report.blocked_way_ids.is_empty() {
             error.report.blocked_way_ids = context.blocked_way_ids;
+            error.report.planned_blocked_way_ids = context.planned_blocked_way_ids;
+            error.report.applied_blocked_way_ids = context.applied_blocked_way_ids;
         }
         error
     })
@@ -456,10 +522,15 @@ mod tests {
             )
             .unwrap();
             assert_eq!(built.manifest, manifest);
-            assert_eq!(
-                serde_json::to_value(&built.report).unwrap(),
-                serde_json::to_value(&report).unwrap()
-            );
+            let mut actual = serde_json::to_value(&built.report).unwrap();
+            let mut expected = serde_json::to_value(&report).unwrap();
+            actual.as_object_mut().unwrap().remove("build_metrics");
+            expected.as_object_mut().unwrap().remove("build_metrics");
+            assert_eq!(actual, expected);
+            assert!(built
+                .report
+                .build_metrics
+                .contains_key("build_way_closure_node_lookups"));
             for file in ["graph.bin", "manifest.json"] {
                 assert_eq!(
                     fs::read(output.join(file)).unwrap(),

@@ -49,34 +49,83 @@ pub struct RestrictionReport {
     pub edges: u64,
     pub restrictions: u64,
     pub diagnostics: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub build_metrics: BTreeMap<String, u64>,
     pub files: BTreeMap<String, (u64, String)>,
     pub peak_scratch_bytes: u64,
     pub aggregation_charged_bytes: u64,
     pub restrictions_resolved: bool,
     pub semantic_validation: bool,
 }
+// Four-way bounded cache of exact rows. Large-page prefetch amplified reads
+// on provincial inputs whose binary-search probes span distant node IDs.
+const CACHE_SETS: usize = 4096;
+const CACHE_WAYS: usize = 4;
+#[derive(Clone, Copy)]
+struct CachedRow {
+    index: u64,
+    row: Row,
+    used: u64,
+}
 struct Table {
     file: File,
     count: u64,
+    cache: Vec<[CachedRow; CACHE_WAYS]>,
+    lookups: u64,
+    probes: u64,
+    reads: u64,
+    read_bytes: u64,
 }
 impl Table {
     fn open(run: &DiskRun) -> Result<Self> {
         Ok(Self {
             file: File::open(&run.path)?,
             count: run.count,
+            cache: vec![
+                [CachedRow {
+                    index: u64::MAX,
+                    row: [0; 6],
+                    used: 0
+                }; CACHE_WAYS];
+                CACHE_SETS
+            ],
+            lookups: 0,
+            probes: 0,
+            reads: 0,
+            read_bytes: 0,
         })
     }
     fn find(&mut self, id: i64, budget: &mut AccessBudget) -> Result<Option<Row>> {
+        self.lookups += 1;
         let (mut lo, mut hi) = (0, self.count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
+            // Always charge the same logical probe, including warm-cache hits.
             budget.charge(WIDTH)?;
-            self.file.seek(SeekFrom::Start(16 + WIDTH * mid))?;
-            let mut bytes = [0; 48];
-            self.file.read_exact(&mut bytes)?;
-            let row: Row = std::array::from_fn(|i| {
-                u64::from_le_bytes(bytes[8 * i..8 * i + 8].try_into().unwrap())
-            });
+            self.probes += 1;
+            // Multiplicative hashing avoids collisions of aligned tree indices.
+            let slot = (mid.wrapping_mul(0x9e3779b97f4a7c15) >> 52) as usize;
+            let set = &mut self.cache[slot];
+            let row = if let Some(cached) = set.iter_mut().find(|entry| entry.index == mid) {
+                cached.used = self.probes;
+                cached.row
+            } else {
+                self.file.seek(SeekFrom::Start(16 + WIDTH * mid))?;
+                let mut bytes = [0; 48];
+                self.file.read_exact(&mut bytes)?;
+                self.reads += 1;
+                self.read_bytes += WIDTH;
+                let row: Row = std::array::from_fn(|i| {
+                    u64::from_le_bytes(bytes[8 * i..8 * i + 8].try_into().unwrap())
+                });
+                let target = set.iter_mut().min_by_key(|entry| entry.used).unwrap();
+                *target = CachedRow {
+                    index: mid,
+                    row,
+                    used: self.probes,
+                };
+                row
+            };
             match row[0].cmp(&key(id)) {
                 std::cmp::Ordering::Equal => return Ok(Some(row)),
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -86,6 +135,7 @@ impl Table {
         Ok(None)
     }
 }
+
 struct DiskAccess {
     graph: DiskEdgeAccess,
     ways: WayEdgeIndex,
@@ -328,9 +378,23 @@ pub(crate) fn resolve_with_audit(
     let raw_nodes = raw_nodes.finish()?;
     let mut node_table = Table::open(&raw_nodes)?;
     let mut raw_ways = Writer::new(&mut work)?;
+    let closure_start = std::time::Instant::now();
+    let mut closure_ways = 0u64;
     let mut build_budget = AccessBudget::new(u64::MAX);
     source.visit(|record| {
         if let Record::Way(way) = record {
+            closure_ways += 1;
+            if closure_ways % 100_000 == 0 {
+                options.stage.observe(crate::staging::BuildProgress {
+                    stage: "way_closure",
+                    attempt: audit.summary.attempt as u64,
+                    completed: closure_ways,
+                    diagnostics_observed: audit.summary.records_observed,
+                    scratch_peak_bytes: work.peak,
+                    scratch_scope: "restrictions",
+                    ..Default::default()
+                });
+            }
             let mut closed = true;
             for id in &way.refs {
                 if node_table.find(*id, &mut build_budget)?.is_none() {
@@ -346,6 +410,16 @@ pub(crate) fn resolve_with_audit(
         Ok(())
     })?;
     let raw_ways = raw_ways.finish()?;
+    let closure_metrics = [
+        (
+            "build_way_closure_elapsed_ms",
+            closure_start.elapsed().as_millis() as u64,
+        ),
+        ("build_way_closure_node_lookups", node_table.lookups),
+        ("build_way_closure_row_probes", node_table.probes),
+        ("build_way_closure_disk_reads", node_table.reads),
+        ("build_way_closure_disk_bytes", node_table.read_bytes),
+    ];
     let mut access = DiskAccess {
         graph,
         ways,
@@ -362,6 +436,10 @@ pub(crate) fn resolve_with_audit(
         limit: options.aggregation_bytes,
     };
     let mut stats = edge_report.diagnostics.clone();
+    let build_metrics: BTreeMap<String, u64> = closure_metrics
+        .into_iter()
+        .map(|(k, v)| (k.into(), v))
+        .collect();
     let start = audit.records.len();
     source
         .visit(|record| {
@@ -413,6 +491,7 @@ pub(crate) fn resolve_with_audit(
             error.report.nodes = edge_report.nodes as usize;
             error.report.edges = edge_report.edges as usize;
             error.report.diagnostics = stats.clone();
+            error.report.build_metrics = build_metrics.clone();
             error.report.source_sha256 = source.report.source_sha256.clone();
             error.report.source_snapshot = source.report.source_snapshot;
             error
@@ -425,6 +504,7 @@ pub(crate) fn resolve_with_audit(
                 nodes: edge_report.nodes as usize,
                 edges: edge_report.edges as usize,
                 diagnostics: stats,
+                build_metrics: build_metrics.clone(),
                 failure_code: Some("InvalidRestriction".into()),
                 source_sha256: source.report.source_sha256.clone(),
                 source_snapshot: source.report.source_snapshot,
@@ -522,6 +602,7 @@ pub(crate) fn resolve_with_audit(
         edges: edge_report.edges,
         restrictions: aggregation.forbidden.len() as u64,
         diagnostics: stats,
+        build_metrics,
         files: BTreeMap::from([("forbidden.jsonl".into(), (bytes, digest))]),
         peak_scratch_bytes: work.peak,
         aggregation_charged_bytes: aggregation.charged,

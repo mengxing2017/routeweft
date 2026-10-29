@@ -379,8 +379,12 @@ pub fn publish_block_ways(
         edges: report.edges as usize,
         restrictions: report.restrictions as usize,
         diagnostics: report.diagnostics.clone(),
+        build_metrics: report.build_metrics.clone(),
         restriction_diagnostics: report.restriction_diagnostics.clone(),
         restriction_audit: report.restriction_audit.clone(),
+        planned_blocked_way_ids: report.blocked_way_ids.clone(),
+        applied_blocked_way_ids: report.blocked_way_ids.clone(),
+        blockways_failure: None,
         blocked_way_ids: report.blocked_way_ids.clone(),
     };
     match result {

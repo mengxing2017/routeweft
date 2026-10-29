@@ -49,6 +49,8 @@ pub struct BlockWaysReport {
     pub edges: u64,
     pub restrictions: u64,
     pub diagnostics: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub build_metrics: BTreeMap<String, u64>,
     #[serde(deserialize_with = "crate::audit::deserialize_diagnostics")]
     pub restriction_diagnostics: Vec<RestrictionDiagnostic>,
     #[serde(default)]
@@ -214,7 +216,7 @@ fn exclusions(
     diagnostics: &mut [RestrictionDiagnostic],
     excluded: &mut BTreeSet<i64>,
     options: BlockWaysOptions,
-) -> Result<bool> {
+) -> Result<Option<crate::BlockWaysFailure>> {
     let lookup: BTreeMap<_, _> = diagnostics
         .iter()
         .enumerate()
@@ -263,7 +265,14 @@ fn exclusions(
     })?;
     for (diagnostic, member) in diagnostics.iter_mut().zip(members) {
         if !member.safe.iter().any(|id| present.contains(id)) {
-            return Ok(false);
+            return Ok(Some(crate::BlockWaysFailure::new(
+                diagnostic,
+                if member.safe.is_empty() {
+                    "NoSafeFromToMember"
+                } else {
+                    "ReferencedWayAbsent"
+                },
+            )));
         }
         for id in member.all {
             if present.contains(&id) && !excluded.contains(&id) {
@@ -281,7 +290,7 @@ fn exclusions(
         }
         diagnostic.action = "blocked_ways".into();
     }
-    Ok(true)
+    Ok(None)
 }
 /// Rebuild the complete intermediate graph after every conservative exclusion.
 /// The source is a completed stage directory. The result is not an Engine dataset.
@@ -326,18 +335,36 @@ pub(crate) fn prepare_with_policy(
         options: options.restriction.stage,
     };
     let mut excluded = BTreeSet::new();
+    let mut applied = Vec::new();
     let mut audit = AuditCollector::new(options.restriction.audit, "external_restrictions")?;
     let mut attempts = 0;
     let mut speed_audit = Vec::new();
     let mut graph_nodes = 0;
     let mut graph_edges = 0;
     let mut graph_diagnostics = BTreeMap::new();
+    let mut measurements = BTreeMap::new();
     let result = (|| {
         loop {
             graph_nodes = 0;
             graph_edges = 0;
             graph_diagnostics.clear();
             attempts += 1;
+            let started = std::time::Instant::now();
+            let progress = |stage, completed, scratch_peak_bytes, diagnostics_observed| {
+                options
+                    .restriction
+                    .stage
+                    .observe(crate::staging::BuildProgress {
+                        stage,
+                        attempt: attempts,
+                        completed,
+                        diagnostics_observed,
+                        scratch_peak_bytes,
+                        scratch_scope: "blockways",
+                        ..Default::default()
+                    });
+            };
+            progress("connection", 0, owned.peak, audit.summary.records_observed);
             audit.begin(attempts as u32);
             let start = audit.records.len();
             let graph = owned.path.join("graph");
@@ -360,14 +387,48 @@ pub(crate) fn prepare_with_policy(
             speed_audit = connection.maxspeed_diagnostics.clone();
             owned.completed(retained, connection.peak_scratch_bytes)?;
             let (stage_options, retained) = owned.remaining()?;
+            measurements.insert(
+                format!("attempt_{attempts}_connection_ms"),
+                started.elapsed().as_millis() as u64,
+            );
+            let phase_started = std::time::Instant::now();
+            progress(
+                "edges",
+                connection.nodes,
+                owned.peak,
+                audit.summary.records_observed,
+            );
             let edge = emit_edges(staged, &joined, &edges, stage_options)?;
             graph_edges = edge.edges as usize;
+            applied = excluded.iter().copied().collect();
             graph_diagnostics = edge.diagnostics.clone();
             owned.completed(retained, edge.peak_scratch_bytes)?;
             let (stage_options, retained) = owned.remaining()?;
+            measurements.insert(
+                format!("attempt_{attempts}_edges_ms"),
+                phase_started.elapsed().as_millis() as u64,
+            );
+            let phase_started = std::time::Instant::now();
+            progress(
+                "adjacency",
+                edge.edges,
+                owned.peak,
+                audit.summary.records_observed,
+            );
             let index = index_adjacency(&edges, &adjacency, stage_options)?;
             owned.completed(retained, index.peak_scratch_bytes)?;
             let (stage_options, retained) = owned.remaining()?;
+            measurements.insert(
+                format!("attempt_{attempts}_adjacency_ms"),
+                phase_started.elapsed().as_millis() as u64,
+            );
+            let phase_started = std::time::Instant::now();
+            progress(
+                "restrictions",
+                0,
+                owned.peak,
+                audit.summary.records_observed,
+            );
             match resolve_with_audit(
                 staged,
                 &joined,
@@ -381,11 +442,17 @@ pub(crate) fn prepare_with_policy(
                 &mut audit,
             ) {
                 Ok(resolved) => {
+                    measurements.insert(
+                        format!("attempt_{attempts}_restrictions_ms"),
+                        phase_started.elapsed().as_millis() as u64,
+                    );
                     owned.completed(retained, resolved.peak_scratch_bytes)?;
                     verify_completed(&joined, &connection, &connection.files)?;
                     verify_completed(&edges, &edge, &edge.files)?;
                     verify_completed(&adjacency, &index, &index.files)?;
                     verify_completed(&restrictions, &resolved, &resolved.files)?;
+                    let mut build_metrics = resolved.build_metrics;
+                    build_metrics.extend(measurements.clone());
                     let mut diagnostics = resolved.diagnostics;
                     diagnostics.insert(
                         "invalid_restrictions_blocked".into(),
@@ -420,6 +487,7 @@ pub(crate) fn prepare_with_policy(
                         edges: resolved.edges,
                         restrictions: resolved.restrictions,
                         diagnostics,
+                        build_metrics,
                         restriction_audit: audit.summary.clone(),
                         restriction_diagnostics: std::mem::take(&mut audit.records),
                         blocked_way_ids: excluded.iter().copied().collect(),
@@ -437,6 +505,21 @@ pub(crate) fn prepare_with_policy(
                 }
                 Err(mut error) => {
                     owned.usage()?;
+                    measurements.insert(
+                        format!("attempt_{attempts}_restrictions_ms"),
+                        phase_started.elapsed().as_millis() as u64,
+                    );
+                    error.report.build_metrics.extend(measurements.clone());
+                    error.report.build_metrics.insert(
+                        "build_attempt_elapsed_ms".into(),
+                        started.elapsed().as_millis() as u64,
+                    );
+                    progress(
+                        "restriction_scan_complete",
+                        audit.records.len() as u64,
+                        owned.peak,
+                        audit.summary.records_observed,
+                    );
                     if policy == InvalidRestrictionPolicy::Reject || !audit.can_block(&error) {
                         return Err(error);
                     }
@@ -446,12 +529,26 @@ pub(crate) fn prepare_with_policy(
                         return Err(error);
                     }
                     let before = excluded.len();
-                    if !exclusions(&source, &mut audit.records[start..], &mut excluded, options)? {
+                    if let Some(blocker) =
+                        exclusions(&source, &mut audit.records[start..], &mut excluded, options)?
+                    {
+                        error.report.blockways_failure = Some(blocker);
+                        error.report.build_metrics.insert(
+                            format!("attempt_{attempts}_new_exclusions"),
+                            (excluded.len() - before) as u64,
+                        );
                         return Err(error);
                     }
                     audit.refresh()?;
+                    measurements.insert(
+                        format!("attempt_{attempts}_new_exclusions"),
+                        (excluded.len() - before) as u64,
+                    );
                     if before == excluded.len() {
-                        return Err(invalid("restriction blocking made no progress").into());
+                        error.report.blockways_failure = audit.records[start..]
+                            .first()
+                            .map(|d| crate::BlockWaysFailure::new(d, "NoNewExclusions"));
+                        return Err(error);
                     }
                     // No stale edge IDs, adjacency or restrictions survive the retry.
                     fs::remove_dir_all(graph)?;
@@ -463,6 +560,11 @@ pub(crate) fn prepare_with_policy(
         Ok(report) => report,
         Err(mut error) => {
             audit.refresh()?;
+            error.report.build_metrics.extend(measurements.clone());
+            error
+                .report
+                .build_metrics
+                .insert("blockways_peak_accounted_scratch_bytes".into(), owned.peak);
             audit.attach(&mut error.report);
             if error.report.nodes == 0 {
                 error.report.nodes = graph_nodes;
@@ -473,6 +575,8 @@ pub(crate) fn prepare_with_policy(
             if error.report.diagnostics.is_empty() {
                 error.report.diagnostics = graph_diagnostics;
             }
+            error.report.planned_blocked_way_ids = excluded.iter().copied().collect();
+            error.report.applied_blocked_way_ids = applied;
             error.report.blocked_way_ids = excluded.into_iter().collect();
             error.report.policy = policy;
             error.report.maxspeed_policy = options.invalid_maxspeed;
@@ -546,8 +650,11 @@ pub(crate) fn prepare_with_policy(
         error.report.nodes = report.nodes as usize;
         error.report.edges = report.edges as usize;
         error.report.diagnostics = report.diagnostics.clone();
+        error.report.build_metrics = report.build_metrics.clone();
         error.report.restriction_diagnostics = std::mem::take(&mut report.restriction_diagnostics);
         error.report.restriction_audit = report.restriction_audit.clone();
+        error.report.planned_blocked_way_ids = report.blocked_way_ids.clone();
+        error.report.applied_blocked_way_ids = report.blocked_way_ids.clone();
         error.report.blocked_way_ids = report.blocked_way_ids.clone();
         error.report.failure_code = Some("IntermediateWriteError".into());
         return Err(error);

@@ -7,8 +7,8 @@ pub mod pbf;
 mod restrictions;
 pub mod staging;
 pub use diagnostics::{
-    BuildOptions, Error, InputReport, InvalidMaxspeedPolicy, InvalidRestrictionPolicy,
-    MaxspeedDiagnostic, MemberDiagnostic, RestrictionDiagnostic, Result,
+    BlockWaysFailure, BuildOptions, Error, InputReport, InvalidMaxspeedPolicy,
+    InvalidRestrictionPolicy, MaxspeedDiagnostic, MemberDiagnostic, RestrictionDiagnostic, Result,
 };
 use pbf::{Osm, Tags};
 use routeweft_dataset::{Adjacency, Edge, Error as DataError, Graph, Manifest, Point};
@@ -508,6 +508,7 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
         return Err(invalid("duplicate relation identity"));
     }
     let mut excluded = BTreeSet::new();
+    let mut applied = Vec::new();
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -540,6 +541,8 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                     restrictions: graph.forbidden.len(),
                     source_snapshot: osm.snapshot,
                     diagnostics: stats,
+                    planned_blocked_way_ids: excluded.iter().copied().collect(),
+                    applied_blocked_way_ids: excluded.iter().copied().collect(),
                     blocked_way_ids: excluded.into_iter().collect(),
                     ..Default::default()
                 };
@@ -547,6 +550,9 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                 return Ok((graph, report));
             }
             Err(mut error) => {
+                if error.report.nodes > 0 && error.report.edges > 0 {
+                    applied = excluded.iter().copied().collect();
+                }
                 let result = (|| -> Result<()> {
                     if options.invalid_restrictions == InvalidRestrictionPolicy::Reject
                         || !audit.can_block(&error)
@@ -592,6 +598,15 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                                 && matches!(m.role.as_str(), "from" | "to")
                                 && osm.ways.contains_key(&m.id)
                         }) {
+                            let reason =
+                                if rel.members.iter().any(|m| {
+                                    m.kind == 1 && matches!(m.role.as_str(), "from" | "to")
+                                }) {
+                                    "ReferencedWayAbsent"
+                                } else {
+                                    "NoSafeFromToMember"
+                                };
+                            error.report.blockways_failure = Some(BlockWaysFailure::new(d, reason));
                             return Ok(());
                         }
                         for m in &rel.members {
@@ -614,7 +629,10 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                         d.action = "blocked_ways".into();
                     }
                     if before == excluded.len() {
-                        return Err(invalid("restriction blocking made no progress"));
+                        error.report.blockways_failure = audit.records[start..]
+                            .first()
+                            .map(|d| BlockWaysFailure::new(d, "NoNewExclusions"));
+                        return Ok(());
                     }
                     audit.refresh()?;
                     Ok(())
@@ -622,9 +640,10 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                 if let Err(other) = result {
                     error.source = other.source;
                     error.report.failure_code = other.report.failure_code;
-                } else if audit.records[start..]
-                    .iter()
-                    .all(|d| d.action == "blocked_ways")
+                } else if error.report.blockways_failure.is_none()
+                    && audit.records[start..]
+                        .iter()
+                        .all(|d| d.action == "blocked_ways")
                     && !audit.records[start..].is_empty()
                 {
                     continue;
@@ -633,6 +652,8 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                 error.report.maxspeed_policy = options.invalid_maxspeed;
                 error.report.maxspeed_diagnostics = speed_audit;
                 error.report.source_snapshot = osm.snapshot;
+                error.report.planned_blocked_way_ids = excluded.iter().copied().collect();
+                error.report.applied_blocked_way_ids = applied;
                 error.report.blocked_way_ids = excluded.into_iter().collect();
                 audit.refresh()?;
                 audit.attach(&mut error.report);

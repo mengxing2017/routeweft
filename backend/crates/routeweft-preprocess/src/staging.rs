@@ -24,6 +24,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const MAGIC: &[u8; 8] = b"RWFTS001";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+/// Opt-in observations; scratch peaks are scoped, not a process RSS estimate.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct BuildProgress {
+    pub stage: &'static str,
+    pub attempt: u64,
+    pub completed: u64,
+    pub diagnostics_observed: u64,
+    pub scratch_peak_bytes: u64,
+    pub scratch_scope: &'static str,
+    pub cancellation_checkpoint: bool,
+}
 /// Hard limits for serialized records and live temporary run bytes.
 #[derive(Clone, Copy)]
 pub struct StageOptions {
@@ -33,6 +44,15 @@ pub struct StageOptions {
     pub record_bytes: u64,
     pub scratch_bytes: u64,
     pub run_files: usize,
+    /// Optional observer; final build results remain on the caller's output channel.
+    pub progress: Option<fn(&BuildProgress)>,
+}
+impl StageOptions {
+    pub(crate) fn observe(self, event: BuildProgress) {
+        if let Some(observer) = self.progress {
+            observer(&event);
+        }
+    }
 }
 impl Default for StageOptions {
     fn default() -> Self {
@@ -43,6 +63,7 @@ impl Default for StageOptions {
             record_bytes: 4 * 1024 * 1024,
             scratch_bytes: 1024 * 1024 * 1024,
             run_files: 64,
+            progress: None,
         }
     }
 }
@@ -104,6 +125,7 @@ struct Stage {
     peak: u64,
     peak_batch: u64,
     published: bool,
+    records_observed: u64,
 }
 impl Drop for Stage {
     fn drop(&mut self) {
@@ -132,6 +154,16 @@ impl Write for LimitedBytes {
 }
 impl Stage {
     fn add(&mut self, record: Record) -> Result<()> {
+        self.records_observed += 1;
+        if self.records_observed % 1_000_000 == 0 {
+            self.options.observe(BuildProgress {
+                stage: "staging_records",
+                completed: self.records_observed,
+                scratch_peak_bytes: self.peak,
+                scratch_scope: "staging",
+                ..Default::default()
+            });
+        }
         let mut encoded = LimitedBytes {
             bytes: Vec::new(),
             limit: self
@@ -393,6 +425,7 @@ pub fn stage(input: &Path, output: &Path, options: StageOptions) -> Result<Stage
     ));
     fs::create_dir(&dir)?;
     let mut stage = Stage {
+        records_observed: 0,
         dir,
         options,
         batch: Vec::new(),
@@ -474,6 +507,7 @@ mod tests {
     }
     fn state(dir: PathBuf, options: StageOptions) -> Stage {
         Stage {
+            records_observed: 0,
             dir,
             options,
             batch: Vec::new(),

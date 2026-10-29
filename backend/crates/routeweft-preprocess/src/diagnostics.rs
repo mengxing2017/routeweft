@@ -96,6 +96,26 @@ impl RestrictionDiagnostic {
         }
     }
 }
+/// Why conservative exclusion cannot safely continue. No roles are inferred.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlockWaysFailure {
+    pub relation_id: i64,
+    pub attempt: u32,
+    pub reason: String,
+    pub recoverable: bool,
+    pub members: Vec<MemberDiagnostic>,
+}
+impl BlockWaysFailure {
+    pub(crate) fn new(d: &RestrictionDiagnostic, reason: &str) -> Self {
+        Self {
+            relation_id: d.relation_id,
+            attempt: d.attempt,
+            reason: reason.into(),
+            recoverable: false,
+            members: d.members.clone(),
+        }
+    }
+}
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct InputReport {
     pub valid: bool,
@@ -109,9 +129,15 @@ pub struct InputReport {
     pub edges: usize,
     pub restrictions: usize,
     pub diagnostics: BTreeMap<String, u64>,
+    pub build_metrics: BTreeMap<String, u64>,
     pub restriction_diagnostics: Vec<RestrictionDiagnostic>,
     pub restriction_audit: crate::RestrictionAuditSummary,
+    /// Legacy alias of planned_blocked_way_ids; does not imply publication.
     pub blocked_way_ids: Vec<i64>,
+    pub planned_blocked_way_ids: Vec<i64>,
+    /// Exclusions used in the last completed node/edge materialization.
+    pub applied_blocked_way_ids: Vec<i64>,
+    pub blockways_failure: Option<BlockWaysFailure>,
 }
 #[derive(Debug)]
 pub struct Error {
@@ -122,6 +148,13 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if matches!(self.source, routeweft_dataset::Error::ResourceLimit(_)) {
             return self.source.fmt(f);
+        }
+        if let Some(blocker) = &self.report.blockways_failure {
+            return write!(
+                f,
+                "relation {}: {} (attempt {}, recoverable=false)",
+                blocker.relation_id, blocker.reason, blocker.attempt
+            );
         }
         if self
             .report
