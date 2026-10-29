@@ -1003,3 +1003,97 @@ fn regional_cli_requires_external_v2_and_enforces_query_memory_budget() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn audit_cli_options_fail_early_and_preserve_structured_errors() {
+    for (flag, value) in [
+        ("--max-restriction-diagnostics", "0"),
+        ("--max-restriction-diagnostics", "32769"),
+        ("--max-restriction-diagnostics", "-1"),
+        ("--max-restriction-audit-bytes", "16777217"),
+        ("--max-restriction-audit-bytes", "0"),
+        ("--max-blockways-attempts", "258"),
+        ("--max-blockways-attempts", "0"),
+    ] {
+        let (code, value) = command(&[
+            "build",
+            "--profile",
+            "driving",
+            "--input",
+            "/does-not-exist.pbf",
+            "--invalid-restrictions",
+            "block_ways",
+            flag,
+            value,
+        ]);
+        assert_eq!(code, 2, "{value}");
+    }
+    let (code, value) = command(&[
+        "preflight",
+        "--mode",
+        "structure",
+        "--profile",
+        "driving",
+        "--input",
+        "/does-not-exist.pbf",
+        "--max-restriction-diagnostics",
+        "256",
+    ]);
+    assert_eq!(code, 2, "{value}");
+    let (code, value) = command(&[
+        "preflight",
+        "--profile",
+        "driving",
+        "--input",
+        "/does-not-exist.pbf",
+        "--max-blockways-attempts",
+        "2",
+    ]);
+    assert_eq!(code, 2, "{value}");
+    let root = temp("routeweft-audit");
+    std::fs::create_dir_all(&root).unwrap();
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    let input = root.join("source.pbf");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--restriction-case", "missing-via"])
+        .status()
+        .unwrap()
+        .success());
+    for builder in ["memory", "external"] {
+        let output = root.join(builder);
+        let (code, value) = command(&[
+            "build",
+            "--input",
+            input.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--output",
+            output.to_str().unwrap(),
+            "--builder",
+            builder,
+            "--format",
+            "2",
+            "--invalid-restrictions",
+            "block_ways",
+            "--max-restriction-audit-bytes",
+            "1",
+        ]);
+        assert_eq!(code, 4, "{value}");
+        assert_eq!(value["error"]["kind"], "BudgetExceeded");
+        assert_eq!(
+            value["error"]["resource"]["resource"],
+            "restriction_audit_bytes"
+        );
+        let report = &value["error"]["details"];
+        assert_eq!(report["failure_code"], "RestrictionAuditLimitExceeded");
+        assert_eq!(report["restriction_audit"]["records_observed"], 1);
+        assert_eq!(report["restriction_audit"]["truncated"], true);
+        assert!(report["nodes"].as_u64().unwrap() > 0);
+        assert_eq!(report["source_sha256"].as_str().unwrap().len(), 64);
+        assert!(!output.exists());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
