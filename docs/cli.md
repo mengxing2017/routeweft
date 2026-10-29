@@ -234,3 +234,15 @@ routeweft build --input region.osm.pbf --profile driving --builder external --fo
 ```
 
 足够的首轮审计容量不代表所有级联轮次可完成，也不代表排除后的路网质量达标。先验证、再抽样路线；不对缺失 via 或不支持的关系推断合法运动。省级输入应运行 regional/external build，不能用仍受内存对象/城市跨度限制的 full preflight 判断可构建性。
+
+### 固定广东输入的可选回归
+
+`ROUTEWEFT_GUANGDONG_PBF` 指向 SHA-256 为 `d942222ce826fb3c1294d697ae97b780e4df3ed99ebc1a3feffb6ea5dca6b19b` 的本地 PBF 后，可执行：
+
+```bash
+cargo test --release --manifest-path backend/Cargo.toml -p routeweft-daemon \
+  --test cli_dataset guangdong_fixed_sha_reports_conservative_blocker_without_publication \
+  -- --ignored --exact
+```
+
+该用例默认忽略，会执行完整省级外部构建，配置 scratch 16 GiB、协作式时限 3600 秒。通过条件是退出 4、明确阻塞于关系 5652903、完整保留 728 条审计、计划 185 条道路但已应用 0 条、无输出数据集且清理私有 scratch；这不是广东路网交付成功的验收。
