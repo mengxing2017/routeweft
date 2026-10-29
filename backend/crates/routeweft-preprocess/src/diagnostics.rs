@@ -9,6 +9,9 @@ pub enum InvalidRestrictionPolicy {
     #[default]
     Reject,
     BlockWays,
+    /// Version 1: explicitly quarantine approved malformed relations, including empty roles.
+    /// May lose road coverage; never infer a turn or silently drop its restriction.
+    QuarantineWays,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BuildOptions {

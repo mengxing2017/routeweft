@@ -70,6 +70,11 @@ impl Source {
             }
             _ => return Err(invalid("publication audit format or legacy limits")),
         }
+        if report.diagnostics.get(crate::quarantine::MARKER).copied()
+            != (report.policy == InvalidRestrictionPolicy::QuarantineWays).then_some(1)
+        {
+            return Err(invalid("publication quarantine policy marker"));
+        }
         let defaults = report.graph_capacity.limits();
         if !report.restrictions_resolved
             || report.nodes == 0
@@ -132,6 +137,9 @@ impl Source {
             "invalid_restriction_ways_blocked".into(),
             m.blocked_way_ids.len() as u64,
         );
+        if m.policy == InvalidRestrictionPolicy::QuarantineWays {
+            diagnostics.insert(crate::quarantine::MARKER.into(), 1);
+        }
         if [
             connection.format_version,
             edges.format_version,

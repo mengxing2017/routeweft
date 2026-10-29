@@ -4,6 +4,7 @@ mod diagnostics;
 pub use audit::{RestrictionAuditLimits, RestrictionAuditSummary};
 mod maxspeed;
 pub mod pbf;
+mod quarantine;
 mod restrictions;
 pub mod staging;
 pub use diagnostics::{
@@ -531,6 +532,9 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                     "invalid_restriction_ways_blocked".into(),
                     excluded.len() as u64,
                 );
+                if options.invalid_restrictions == InvalidRestrictionPolicy::QuarantineWays {
+                    stats.insert(quarantine::MARKER.into(), 1);
+                }
                 let mut report = InputReport {
                     valid: true,
                     policy: options.invalid_restrictions,
@@ -593,19 +597,18 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                             .iter()
                             .find(|r| r.id == d.relation_id)
                             .ok_or_else(|| invalid("relation identity"))?;
-                        if !rel.members.iter().any(|m| {
-                            m.kind == 1
-                                && matches!(m.role.as_str(), "from" | "to")
-                                && osm.ways.contains_key(&m.id)
-                        }) {
-                            let reason =
-                                if rel.members.iter().any(|m| {
-                                    m.kind == 1 && matches!(m.role.as_str(), "from" | "to")
-                                }) {
-                                    "ReferencedWayAbsent"
-                                } else {
-                                    "NoSafeFromToMember"
-                                };
+                        let present = rel
+                            .members
+                            .iter()
+                            .filter(|m| m.kind == 1 && osm.ways.contains_key(&m.id))
+                            .map(|m| m.id)
+                            .collect();
+                        if let Some(reason) = quarantine::failure(
+                            options.invalid_restrictions,
+                            rel,
+                            &d.code,
+                            &present,
+                        ) {
                             error.report.blockways_failure = Some(BlockWaysFailure::new(d, reason));
                             return Ok(());
                         }

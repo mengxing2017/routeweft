@@ -209,13 +209,14 @@ fn verify_completed(
 #[derive(Default)]
 struct Members {
     all: Vec<i64>,
-    safe: Vec<i64>,
+    relation: Option<crate::pbf::Relation>,
 }
 fn exclusions(
     source: &Source,
     diagnostics: &mut [RestrictionDiagnostic],
     excluded: &mut BTreeSet<i64>,
     options: BlockWaysOptions,
+    policy: InvalidRestrictionPolicy,
 ) -> Result<Option<crate::BlockWaysFailure>> {
     let lookup: BTreeMap<_, _> = diagnostics
         .iter()
@@ -226,7 +227,8 @@ fn exclusions(
     let mut candidates = BTreeSet::new();
     let mut count = 0;
     let mut found = 0;
-    source.visit(|record| {
+    let mut relation_bytes = 0u64;
+    source.visit_kinds(&[2], |record| {
         if let Record::Relation(rel) = record {
             if let Some(&index) = lookup.get(&rel.id) {
                 found += 1;
@@ -243,10 +245,20 @@ fn exclusions(
                     }
                     members[index].all.push(member.id);
                     candidates.insert(member.id);
-                    if matches!(member.role.as_str(), "from" | "to") {
-                        members[index].safe.push(member.id);
-                    }
                 }
+                relation_bytes += serde_json::to_vec(&rel)
+                    .map_err(|e| invalid(e.to_string()))?
+                    .len() as u64;
+                if relation_bytes > 16 * 1024 * 1024 {
+                    return Err(resource_limit(
+                        "exclusion_source_relation_bytes",
+                        16 * 1024 * 1024,
+                        relation_bytes,
+                        "external_blockways",
+                    )
+                    .into());
+                }
+                members[index].relation = Some(rel);
             }
         }
         Ok(())
@@ -255,7 +267,7 @@ fn exclusions(
         return Err(invalid("BlockWays relation identity").into());
     }
     let mut present = BTreeSet::new();
-    source.visit(|record| {
+    source.visit_kinds(&[1], |record| {
         if let Record::Way(way) = record {
             if candidates.contains(&way.id) {
                 present.insert(way.id);
@@ -264,15 +276,16 @@ fn exclusions(
         Ok(())
     })?;
     for (diagnostic, member) in diagnostics.iter_mut().zip(members) {
-        if !member.safe.iter().any(|id| present.contains(id)) {
-            return Ok(Some(crate::BlockWaysFailure::new(
-                diagnostic,
-                if member.safe.is_empty() {
-                    "NoSafeFromToMember"
-                } else {
-                    "ReferencedWayAbsent"
-                },
-            )));
+        if let Some(reason) = crate::quarantine::failure(
+            policy,
+            member
+                .relation
+                .as_ref()
+                .ok_or_else(|| invalid("missing original relation"))?,
+            &diagnostic.code,
+            &present,
+        ) {
+            return Ok(Some(crate::BlockWaysFailure::new(diagnostic, reason)));
         }
         for id in member.all {
             if present.contains(&id) && !excluded.contains(&id) {
@@ -454,6 +467,9 @@ pub(crate) fn prepare_with_policy(
                     let mut build_metrics = resolved.build_metrics;
                     build_metrics.extend(measurements.clone());
                     let mut diagnostics = resolved.diagnostics;
+                    if policy == InvalidRestrictionPolicy::QuarantineWays {
+                        diagnostics.insert(crate::quarantine::MARKER.into(), 1);
+                    }
                     diagnostics.insert(
                         "invalid_restrictions_blocked".into(),
                         audit.records.len() as u64,
@@ -529,9 +545,13 @@ pub(crate) fn prepare_with_policy(
                         return Err(error);
                     }
                     let before = excluded.len();
-                    if let Some(blocker) =
-                        exclusions(&source, &mut audit.records[start..], &mut excluded, options)?
-                    {
+                    if let Some(blocker) = exclusions(
+                        &source,
+                        &mut audit.records[start..],
+                        &mut excluded,
+                        options,
+                        policy,
+                    )? {
                         error.report.blockways_failure = Some(blocker);
                         error.report.build_metrics.insert(
                             format!("attempt_{attempts}_new_exclusions"),
@@ -1236,6 +1256,98 @@ mod tests {
             .contains("relation 2: ReferencedWayAbsent"));
         assert!(!output.exists());
         fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn quarantine_empty_roles_cascades_only_exits_and_publishes_loss_marker() {
+        let parent = temporary();
+        let mut osm = fixture();
+        osm.relations.push(relation(
+            5652903,
+            "no_right_turn",
+            &[(1, 20, ""), (1, 40, "")],
+        ));
+        osm.relations.push(relation(
+            2,
+            "only_straight_on",
+            &[(1, 10, "from"), (0, -1, "via"), (1, 20, "to")],
+        ));
+        let staged = source(&parent, &osm);
+        let output = parent.join("ready");
+        assert!(crate::prepare(&osm, Default::default()).is_err());
+        let policy = InvalidRestrictionPolicy::QuarantineWays;
+        let (memory, audit) = crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: policy,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let disk = prepare_with_policy(&staged, &output, Default::default(), policy).unwrap();
+        assert_eq!(disk.attempts, 3);
+        assert_eq!(disk.blocked_way_ids, vec![10, 20, 40]);
+        assert_eq!(graph(&output), memory);
+        assert_eq!(audit.diagnostics, disk.diagnostics);
+        assert!(memory
+            .edges
+            .iter()
+            .all(|e| !disk.blocked_way_ids.contains(&e.way)));
+        let published = parent.join("published");
+        let result =
+            super::super::publish_block_ways(&output, &published, Default::default()).unwrap();
+        assert_eq!(result.manifest.diagnostics[crate::quarantine::MARKER], 1);
+        assert_eq!(result.input.applied_blocked_way_ids, disk.blocked_way_ids);
+        // The policy marker is authenticated along with the child counts/audit.
+        let manifest = output.join("manifest.json");
+        let mut changed: serde_json::Value =
+            serde_json::from_reader(File::open(&manifest).unwrap()).unwrap();
+        changed["policy"] = serde_json::json!("block_ways");
+        fs::write(manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(super::super::publish_block_ways(
+            &output,
+            &parent.join("tampered"),
+            Default::default()
+        )
+        .is_err());
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn quarantine_refuses_nested_dependencies_and_unapproved_values() {
+        for (rule, member, reason) in [
+            ("no_right_turn", (2, 999, ""), "UnboundedMemberDependency"),
+            (
+                "unrecognized",
+                (0, -1, "via"),
+                "QuarantineCategoryNotApproved",
+            ),
+        ] {
+            let parent = temporary();
+            let mut osm = fixture();
+            osm.relations
+                .push(relation(1, rule, &[(1, 10, ""), member]));
+            let staged = source(&parent, &osm);
+            let policy = InvalidRestrictionPolicy::QuarantineWays;
+            let memory = crate::prepare(
+                &osm,
+                crate::BuildOptions {
+                    invalid_restrictions: policy,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            let disk =
+                prepare_with_policy(&staged, &parent.join("ready"), Default::default(), policy)
+                    .unwrap_err();
+            for error in [&memory, &disk] {
+                assert_eq!(
+                    error.report.blockways_failure.as_ref().unwrap().reason,
+                    reason
+                );
+                assert!(!error.report.valid);
+                assert!(error.report.applied_blocked_way_ids.is_empty());
+            }
+            fs::remove_dir_all(parent).unwrap();
+        }
     }
     #[test]
     fn guangdong_empty_roles_fail_closed_in_both_builders() {
