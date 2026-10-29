@@ -286,7 +286,12 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             {
                 "reject" => routeweft_preprocess::InvalidRestrictionPolicy::Reject,
                 "block_ways" => routeweft_preprocess::InvalidRestrictionPolicy::BlockWays,
-                _ => return Err(bad("invalid restriction policy; use reject or block_ways")),
+                "quarantine_ways" => routeweft_preprocess::InvalidRestrictionPolicy::QuarantineWays,
+                _ => {
+                    return Err(bad(
+                        "invalid restriction policy; use reject, block_ways or quarantine_ways",
+                    ))
+                }
             },
             restriction_audit: Default::default(),
         };
@@ -302,10 +307,10 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         }
         if let Some(value) = flags.get("--max-blockways-attempts") {
             if options.invalid_restrictions
-                != routeweft_preprocess::InvalidRestrictionPolicy::BlockWays
+                == routeweft_preprocess::InvalidRestrictionPolicy::Reject
             {
                 return Err(bad(
-                    "--max-blockways-attempts requires --invalid-restrictions block_ways",
+                    "--max-blockways-attempts requires block_ways or quarantine_ways",
                 ));
             }
             options.restriction_audit.max_blockways_attempts = value
