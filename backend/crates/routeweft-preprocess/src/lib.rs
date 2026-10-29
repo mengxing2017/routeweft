@@ -1,5 +1,7 @@
 //! Offline PBF preprocessing with a deliberately conservative driving profile.
+mod audit;
 mod diagnostics;
+pub use audit::{RestrictionAuditLimits, RestrictionAuditSummary};
 mod maxspeed;
 pub mod pbf;
 mod restrictions;
@@ -227,11 +229,26 @@ fn blocked_node(tags: &Tags) -> bool {
                 "no" | "entrance" | "cattle_grid" | "toll_booth" | "border_control"
             ))
 }
+#[cfg(test)]
 fn graph_attempt(
     osm: &Osm,
     excluded: &BTreeSet<i64>,
     policy: InvalidMaxspeedPolicy,
     speed_audit: &mut Vec<MaxspeedDiagnostic>,
+) -> Result<(Graph, BTreeMap<String, u64>)> {
+    let mut audit = audit::AuditCollector::new(Default::default(), "memory_restrictions")?;
+    audit.begin(1);
+    graph_attempt_with_audit(osm, excluded, policy, speed_audit, &mut audit).map_err(|mut error| {
+        audit.attach(&mut error.report);
+        error
+    })
+}
+fn graph_attempt_with_audit(
+    osm: &Osm,
+    excluded: &BTreeSet<i64>,
+    policy: InvalidMaxspeedPolicy,
+    speed_audit: &mut Vec<MaxspeedDiagnostic>,
+    audit: &mut audit::AuditCollector,
 ) -> Result<(Graph, BTreeMap<String, u64>)> {
     let mut stats = BTreeMap::from([
         ("input_nodes".into(), osm.nodes.len() as u64),
@@ -394,7 +411,7 @@ fn graph_attempt(
         .transpose()?;
     let mut forbidden = BTreeSet::new();
     let mut only: BTreeMap<Vec<usize>, BTreeSet<usize>> = BTreeMap::new();
-    let mut failures = Vec::new();
+    let start = audit.records.len();
     for rel in &osm.relations {
         if value(&rel.tags, "type") != "restriction" {
             continue;
@@ -434,21 +451,23 @@ fn graph_attempt(
             }
             Ok(None) => count(&mut stats, "non_driving_restrictions"),
             Err(diagnostic) => {
-                if failures.len() >= 256 {
-                    return Err(DataError::LimitExceeded.into());
+                if let Err(mut error) = audit.push(*diagnostic) {
+                    error.report.nodes = nodes.len();
+                    error.report.edges = edges.len();
+                    error.report.diagnostics = stats;
+                    return Err(error);
                 }
-                failures.push(*diagnostic);
             }
         }
     }
-    if !failures.is_empty() {
+    audit.complete();
+    if audit.records.len() > start {
         return Err(Error {
             source: routeweft_dataset::invalid("invalid driving restrictions"),
             report: Box::new(InputReport {
                 nodes: nodes.len(),
                 edges: edges.len(),
                 diagnostics: stats,
-                restriction_diagnostics: failures,
                 failure_code: Some("InvalidRestriction".into()),
                 ..Default::default()
             }),
@@ -483,22 +502,35 @@ fn graph_attempt(
 /// BlockWays re-runs resolution after every conservative road exclusion, since
 /// removing one road can invalidate another restriction's directed path.
 pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)> {
+    let mut audit = audit::AuditCollector::new(options.restriction_audit, "memory_restrictions")?;
     let mut relation_ids = BTreeSet::new();
     if osm.relations.iter().any(|r| !relation_ids.insert(r.id)) {
         return Err(invalid("duplicate relation identity"));
     }
     let mut excluded = BTreeSet::new();
-    let mut audit = Vec::new();
+    let mut attempt = 0;
     loop {
+        attempt += 1;
+        audit.begin(attempt);
+        let start = audit.records.len();
         let mut speed_audit = Vec::new();
-        match graph_attempt(osm, &excluded, options.invalid_maxspeed, &mut speed_audit) {
+        match graph_attempt_with_audit(
+            osm,
+            &excluded,
+            options.invalid_maxspeed,
+            &mut speed_audit,
+            &mut audit,
+        ) {
             Ok((graph, mut stats)) => {
-                stats.insert("invalid_restrictions_blocked".into(), audit.len() as u64);
+                stats.insert(
+                    "invalid_restrictions_blocked".into(),
+                    audit.records.len() as u64,
+                );
                 stats.insert(
                     "invalid_restriction_ways_blocked".into(),
                     excluded.len() as u64,
                 );
-                let report = InputReport {
+                let mut report = InputReport {
                     valid: true,
                     policy: options.invalid_restrictions,
                     maxspeed_policy: options.invalid_maxspeed,
@@ -508,60 +540,109 @@ pub fn prepare(osm: &Osm, options: BuildOptions) -> Result<(Graph, InputReport)>
                     restrictions: graph.forbidden.len(),
                     source_snapshot: osm.snapshot,
                     diagnostics: stats,
-                    restriction_diagnostics: audit,
                     blocked_way_ids: excluded.into_iter().collect(),
                     ..Default::default()
                 };
+                audit.attach(&mut report);
                 return Ok((graph, report));
             }
             Err(mut error) => {
+                let result = (|| -> Result<()> {
+                    if options.invalid_restrictions == InvalidRestrictionPolicy::Reject
+                        || !audit.can_block(&error)
+                    {
+                        return Ok(());
+                    }
+                    if attempt >= options.restriction_audit.max_blockways_attempts {
+                        error.source = audit.attempt_limit().source;
+                        error.report.failure_code = Some("BlockWaysAttemptLimitExceeded".into());
+                        return Ok(());
+                    }
+                    let references =
+                        audit.records[start..].iter().try_fold(0usize, |count, d| {
+                            let rel = osm
+                                .relations
+                                .iter()
+                                .find(|r| r.id == d.relation_id)
+                                .ok_or_else(|| invalid("relation identity"))?;
+                            Ok::<_, Error>(
+                                count.saturating_add(
+                                    rel.members.iter().filter(|m| m.kind == 1).count(),
+                                ),
+                            )
+                        })?;
+                    if references > 65_536 {
+                        return Err(routeweft_dataset::resource_limit(
+                            "blockways_member_references",
+                            65_536,
+                            references as u64,
+                            "memory_restrictions",
+                        )
+                        .into());
+                    }
+                    let before = excluded.len();
+                    for d in &mut audit.records[start..] {
+                        let rel = osm
+                            .relations
+                            .iter()
+                            .find(|r| r.id == d.relation_id)
+                            .ok_or_else(|| invalid("relation identity"))?;
+                        if !rel.members.iter().any(|m| {
+                            m.kind == 1
+                                && matches!(m.role.as_str(), "from" | "to")
+                                && osm.ways.contains_key(&m.id)
+                        }) {
+                            return Ok(());
+                        }
+                        for m in &rel.members {
+                            if m.kind == 1
+                                && osm.ways.contains_key(&m.id)
+                                && !excluded.contains(&m.id)
+                            {
+                                if excluded.len() == 32_768 {
+                                    return Err(routeweft_dataset::resource_limit(
+                                        "blockways_blocked_ways",
+                                        32_768,
+                                        excluded.len() as u64 + 1,
+                                        "memory_restrictions",
+                                    )
+                                    .into());
+                                }
+                                excluded.insert(m.id);
+                            }
+                        }
+                        d.action = "blocked_ways".into();
+                    }
+                    if before == excluded.len() {
+                        return Err(invalid("restriction blocking made no progress"));
+                    }
+                    audit.refresh()?;
+                    Ok(())
+                })();
+                if let Err(other) = result {
+                    error.source = other.source;
+                    error.report.failure_code = other.report.failure_code;
+                } else if audit.records[start..]
+                    .iter()
+                    .all(|d| d.action == "blocked_ways")
+                    && !audit.records[start..].is_empty()
+                {
+                    continue;
+                }
                 error.report.policy = options.invalid_restrictions;
                 error.report.maxspeed_policy = options.invalid_maxspeed;
                 error.report.maxspeed_diagnostics = speed_audit;
                 error.report.source_snapshot = osm.snapshot;
-                if options.invalid_restrictions == InvalidRestrictionPolicy::Reject
-                    || error.report.restriction_diagnostics.is_empty()
-                {
-                    audit.append(&mut error.report.restriction_diagnostics);
-                    error.report.restriction_diagnostics = audit;
-                    error.report.blocked_way_ids = excluded.into_iter().collect();
-                    return Err(error);
-                }
-                if audit.len() + error.report.restriction_diagnostics.len() > 256 {
-                    return Err(DataError::LimitExceeded.into());
-                }
-                let before = excluded.len();
-                for d in &mut error.report.restriction_diagnostics {
-                    // Only a complete from/to way can safely stop the affected
-                    // movement. A relation-only or unknown member is not guessed.
-                    let rel = osm
-                        .relations
-                        .iter()
-                        .find(|r| r.id == d.relation_id)
-                        .ok_or_else(|| invalid("relation identity"))?;
-                    if !rel.members.iter().any(|m| {
-                        m.kind == 1
-                            && matches!(m.role.as_str(), "from" | "to")
-                            && osm.ways.contains_key(&m.id)
-                    }) {
-                        return Err(error);
-                    }
-                    for m in &rel.members {
-                        if m.kind == 1 && osm.ways.contains_key(&m.id) {
-                            excluded.insert(m.id);
-                        }
-                    }
-                    d.action = "blocked_ways".into();
-                }
-                audit.append(&mut error.report.restriction_diagnostics);
-                if before == excluded.len() {
-                    return Err(invalid("restriction blocking made no progress"));
-                }
+                error.report.blocked_way_ids = excluded.into_iter().collect();
+                audit.refresh()?;
+                audit.attach(&mut error.report);
+                return Err(error);
             }
         }
     }
 }
 fn input(input: &Path, options: BuildOptions) -> Result<(Graph, InputReport)> {
+    options.restriction_audit.validate()?;
     let input_error = |source| Error {
         source,
         report: Box::new(InputReport {

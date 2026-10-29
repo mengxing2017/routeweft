@@ -14,6 +14,7 @@ pub enum InvalidRestrictionPolicy {
 pub struct BuildOptions {
     pub invalid_restrictions: InvalidRestrictionPolicy,
     pub invalid_maxspeed: InvalidMaxspeedPolicy,
+    pub restriction_audit: crate::RestrictionAuditLimits,
 }
 /// Explicit opt-in to estimate costs from the profile when a speed tag is invalid.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,30 +29,41 @@ pub struct MaxspeedDiagnostic {
     pub way_id: i64,
     pub field: String,
     pub value: String,
+    #[serde(deserialize_with = "crate::audit::short_string")]
     pub action: String,
     pub effective_kmh: Option<f64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberDiagnostic {
+    #[serde(deserialize_with = "crate::audit::short_string")]
     pub kind: String,
     pub id: i64,
+    #[serde(deserialize_with = "crate::audit::role_string")]
     pub role: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RestrictionDiagnostic {
     pub relation_id: i64,
+    #[serde(default)]
+    pub attempt: u32,
     /// Stable machine-readable category, independent of the human message.
+    #[serde(deserialize_with = "crate::audit::short_string")]
     pub code: String,
+    #[serde(deserialize_with = "crate::audit::message_string")]
     pub message: String,
+    #[serde(deserialize_with = "crate::audit::tags")]
     pub tags: BTreeMap<String, String>,
+    #[serde(deserialize_with = "crate::audit::members")]
     pub members: Vec<MemberDiagnostic>,
     pub members_truncated: bool,
+    #[serde(deserialize_with = "crate::audit::short_string")]
     pub action: String,
 }
 impl RestrictionDiagnostic {
     pub(crate) fn new(rel: &Relation, code: &str, message: impl Into<String>) -> Self {
         Self {
             relation_id: rel.id,
+            attempt: 0,
             code: code.into(),
             message: message.into(),
             tags: rel
@@ -98,6 +110,7 @@ pub struct InputReport {
     pub restrictions: usize,
     pub diagnostics: BTreeMap<String, u64>,
     pub restriction_diagnostics: Vec<RestrictionDiagnostic>,
+    pub restriction_audit: crate::RestrictionAuditSummary,
     pub blocked_way_ids: Vec<i64>,
 }
 #[derive(Debug)]
@@ -107,6 +120,9 @@ pub struct Error {
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if matches!(self.source, routeweft_dataset::Error::ResourceLimit(_)) {
+            return self.source.fmt(f);
+        }
         if self
             .report
             .restriction_diagnostics

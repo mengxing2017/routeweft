@@ -177,6 +177,7 @@ fn run(
     options: ExternalBuildOptions,
     mut checkpoint: impl FnMut(Phase) -> Result<()>,
 ) -> Result<ExternalBuildResult> {
+    options.build.restriction_audit.validate()?;
     if fs::symlink_metadata(output).is_ok() {
         return Err(invalid("output already exists").into());
     }
@@ -281,6 +282,7 @@ fn run(
                     },
                     relation_access_bytes: options.restriction_access_bytes,
                     aggregation_bytes: options.restriction_aggregation_bytes,
+                    audit: options.build.restriction_audit,
                 },
                 ..Default::default()
             },
@@ -299,6 +301,7 @@ fn run(
             restrictions: graph.restrictions as usize,
             diagnostics: graph.diagnostics,
             restriction_diagnostics: graph.restriction_diagnostics,
+            restriction_audit: graph.restriction_audit,
             blocked_way_ids: graph.blocked_way_ids,
         };
         owned.observe(
@@ -381,6 +384,9 @@ fn run(
         }
         if error.report.diagnostics.is_empty() {
             error.report.diagnostics = context.diagnostics;
+        }
+        if error.report.restriction_audit.attempt == 0 {
+            error.report.restriction_audit = context.restriction_audit;
         }
         if error.report.restriction_diagnostics.is_empty() {
             error.report.restriction_diagnostics = context.restriction_diagnostics;

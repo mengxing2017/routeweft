@@ -10,6 +10,7 @@ use crate::{
 pub use adjacency::{index_adjacency, AccessBudget, AdjacencyReport, DiskEdgeAccess};
 use routeweft_dataset::{hash_file, invalid, resource_limit, Edge, Point};
 use serde::{Deserialize, Serialize};
+pub(crate) use static_restrictions::resolve_with_audit;
 pub use static_restrictions::{resolve_restrictions, RestrictionOptions, RestrictionReport};
 use std::collections::BTreeMap;
 use std::fs::{self, File};

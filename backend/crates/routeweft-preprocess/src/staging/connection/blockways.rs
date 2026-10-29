@@ -1,15 +1,14 @@
 //! Bounded intermediate BlockWays retries. No final dataset or runtime publication.
+use super::edges::resolve_with_audit;
 use super::{connect_excluding, Source};
-use crate::staging::{
-    emit_edges, index_adjacency, resolve_restrictions, Record, RestrictionOptions, StageOptions,
-    NEXT,
-};
+use crate::audit::{AuditCollector, BoundedWriter, BLOCKWAYS_MANIFEST_MAX_BYTES};
+use crate::staging::{emit_edges, index_adjacency, Record, RestrictionOptions, StageOptions, NEXT};
 use crate::{InvalidRestrictionPolicy, RestrictionDiagnostic, Result};
 use routeweft_dataset::{hash_file, invalid, resource_limit};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
@@ -50,7 +49,10 @@ pub struct BlockWaysReport {
     pub edges: u64,
     pub restrictions: u64,
     pub diagnostics: BTreeMap<String, u64>,
+    #[serde(deserialize_with = "crate::audit::deserialize_diagnostics")]
     pub restriction_diagnostics: Vec<RestrictionDiagnostic>,
+    #[serde(default)]
+    pub restriction_audit: crate::RestrictionAuditSummary,
     pub blocked_way_ids: Vec<i64>,
     pub attempts: u64,
     pub peak_scratch_bytes: u64,
@@ -138,7 +140,7 @@ impl Owned {
         let (bytes, count) = self.usage()?;
         // Child stages account payloads/runs, but write one completion manifest separately.
         // All child manifest readers cap at 1 MiB; reserve that bound and one file.
-        let metadata = 1024 * 1024;
+        let metadata = 1024 * 1024 + BLOCKWAYS_MANIFEST_MAX_BYTES;
         if self.options.run_files.saturating_sub(count) <= 1 {
             return Err(resource_limit(
                 "blockways_files",
@@ -297,6 +299,7 @@ pub(crate) fn prepare_with_policy(
     options: BlockWaysOptions,
     policy: InvalidRestrictionPolicy,
 ) -> Result<BlockWaysReport> {
+    options.restriction.audit.validate()?;
     if options.max_blocked_ways > 32_768 || options.max_member_references > 65_536 {
         return Err(invalid("BlockWays limits exceed intermediate caps").into());
     }
@@ -323,16 +326,20 @@ pub(crate) fn prepare_with_policy(
         options: options.restriction.stage,
     };
     let mut excluded = BTreeSet::new();
-    let mut audit = Vec::new();
+    let mut audit = AuditCollector::new(options.restriction.audit, "external_restrictions")?;
     let mut attempts = 0;
     let mut speed_audit = Vec::new();
+    let mut graph_nodes = 0;
+    let mut graph_edges = 0;
+    let mut graph_diagnostics = BTreeMap::new();
     let result = (|| {
         loop {
+            graph_nodes = 0;
+            graph_edges = 0;
+            graph_diagnostics.clear();
             attempts += 1;
-            // At most 256 audited failures: each successful retry must add one.
-            if attempts > 257 {
-                return Err(invalid("BlockWays retry limit").into());
-            }
+            audit.begin(attempts as u32);
+            let start = audit.records.len();
             let graph = owned.path.join("graph");
             fs::create_dir(&graph)?;
             let joined = graph.join("connection");
@@ -348,16 +355,20 @@ pub(crate) fn prepare_with_policy(
                 &excluded,
                 options.invalid_maxspeed,
             )?;
+            graph_nodes = connection.nodes as usize;
+            graph_diagnostics = connection.diagnostics.clone();
             speed_audit = connection.maxspeed_diagnostics.clone();
             owned.completed(retained, connection.peak_scratch_bytes)?;
             let (stage_options, retained) = owned.remaining()?;
             let edge = emit_edges(staged, &joined, &edges, stage_options)?;
+            graph_edges = edge.edges as usize;
+            graph_diagnostics = edge.diagnostics.clone();
             owned.completed(retained, edge.peak_scratch_bytes)?;
             let (stage_options, retained) = owned.remaining()?;
             let index = index_adjacency(&edges, &adjacency, stage_options)?;
             owned.completed(retained, index.peak_scratch_bytes)?;
             let (stage_options, retained) = owned.remaining()?;
-            match resolve_restrictions(
+            match resolve_with_audit(
                 staged,
                 &joined,
                 &edges,
@@ -367,6 +378,7 @@ pub(crate) fn prepare_with_policy(
                     stage: stage_options,
                     ..options.restriction
                 },
+                &mut audit,
             ) {
                 Ok(resolved) => {
                     owned.completed(retained, resolved.peak_scratch_bytes)?;
@@ -375,7 +387,10 @@ pub(crate) fn prepare_with_policy(
                     verify_completed(&adjacency, &index, &index.files)?;
                     verify_completed(&restrictions, &resolved, &resolved.files)?;
                     let mut diagnostics = resolved.diagnostics;
-                    diagnostics.insert("invalid_restrictions_blocked".into(), audit.len() as u64);
+                    diagnostics.insert(
+                        "invalid_restrictions_blocked".into(),
+                        audit.records.len() as u64,
+                    );
                     diagnostics.insert(
                         "invalid_restriction_ways_blocked".into(),
                         excluded.len() as u64,
@@ -396,7 +411,7 @@ pub(crate) fn prepare_with_policy(
                         graph_capacity: options.restriction.stage.graph_capacity,
                         maxspeed_policy: options.invalid_maxspeed,
                         maxspeed_diagnostics: speed_audit.clone(),
-                        format_version: 1,
+                        format_version: 2,
                         policy,
                         source_records_sha256: source.run.digest.clone(),
                         source_sha256: source.report.source_sha256.clone(),
@@ -405,7 +420,8 @@ pub(crate) fn prepare_with_policy(
                         edges: resolved.edges,
                         restrictions: resolved.restrictions,
                         diagnostics,
-                        restriction_diagnostics: std::mem::take(&mut audit),
+                        restriction_audit: audit.summary.clone(),
+                        restriction_diagnostics: std::mem::take(&mut audit.records),
                         blocked_way_ids: excluded.iter().copied().collect(),
                         attempts,
                         peak_scratch_bytes: owned.peak,
@@ -421,24 +437,19 @@ pub(crate) fn prepare_with_policy(
                 }
                 Err(mut error) => {
                     owned.usage()?;
-                    if policy == InvalidRestrictionPolicy::Reject
-                        || error.report.restriction_diagnostics.is_empty()
-                    {
+                    if policy == InvalidRestrictionPolicy::Reject || !audit.can_block(&error) {
                         return Err(error);
                     }
-                    if audit.len() + error.report.restriction_diagnostics.len() > 256 {
-                        return Err(routeweft_dataset::Error::LimitExceeded.into());
+                    if attempts >= options.restriction.audit.max_blockways_attempts as u64 {
+                        error.source = audit.attempt_limit().source;
+                        error.report.failure_code = Some("BlockWaysAttemptLimitExceeded".into());
+                        return Err(error);
                     }
                     let before = excluded.len();
-                    if !exclusions(
-                        &source,
-                        &mut error.report.restriction_diagnostics,
-                        &mut excluded,
-                        options,
-                    )? {
+                    if !exclusions(&source, &mut audit.records[start..], &mut excluded, options)? {
                         return Err(error);
                     }
-                    audit.append(&mut error.report.restriction_diagnostics);
+                    audit.refresh()?;
                     if before == excluded.len() {
                         return Err(invalid("restriction blocking made no progress").into());
                     }
@@ -451,8 +462,17 @@ pub(crate) fn prepare_with_policy(
     let mut report = match result {
         Ok(report) => report,
         Err(mut error) => {
-            audit.append(&mut error.report.restriction_diagnostics);
-            error.report.restriction_diagnostics = audit;
+            audit.refresh()?;
+            audit.attach(&mut error.report);
+            if error.report.nodes == 0 {
+                error.report.nodes = graph_nodes;
+            }
+            if error.report.edges == 0 {
+                error.report.edges = graph_edges;
+            }
+            if error.report.diagnostics.is_empty() {
+                error.report.diagnostics = graph_diagnostics;
+            }
             error.report.blocked_way_ids = excluded.into_iter().collect();
             error.report.policy = policy;
             error.report.maxspeed_policy = options.invalid_maxspeed;
@@ -468,9 +488,21 @@ pub(crate) fn prepare_with_policy(
         // Include the top-level manifest itself in the final scratch/file allowance.
         let (retained, count) = owned.usage()?;
         loop {
-            let encoded = serde_json::to_vec(&report).map_err(|e| invalid(e.to_string()))?;
+            let mut encoded = BoundedWriter {
+                inner: std::io::sink(),
+                written: 0,
+                limit: BLOCKWAYS_MANIFEST_MAX_BYTES,
+            };
+            serde_json::to_writer(&mut encoded, &report).map_err(|_| {
+                resource_limit(
+                    "blockways_manifest_bytes",
+                    BLOCKWAYS_MANIFEST_MAX_BYTES,
+                    BLOCKWAYS_MANIFEST_MAX_BYTES + 1,
+                    "external_blockways",
+                )
+            })?;
             let total = retained
-                .checked_add(encoded.len() as u64)
+                .checked_add(encoded.written)
                 .ok_or_else(|| invalid("BlockWays manifest size"))?;
             let peak = owned.peak.max(total);
             let peak_retained_files = owned.peak_retained_files.max(count + 1);
@@ -482,7 +514,14 @@ pub(crate) fn prepare_with_policy(
                     .write(true)
                     .create_new(true)
                     .open(owned.path.join("manifest.json"))?;
-                file.write_all(&encoded)?;
+                let mut writer = BoundedWriter {
+                    inner: BufWriter::new(&mut file),
+                    written: 0,
+                    limit: BLOCKWAYS_MANIFEST_MAX_BYTES,
+                };
+                serde_json::to_writer(&mut writer, &report).map_err(|e| invalid(e.to_string()))?;
+                writer.flush()?;
+                drop(writer);
                 file.sync_all()?;
                 break;
             }

@@ -23,6 +23,7 @@ pub struct RestrictionOptions {
     pub relation_access_bytes: u64,
     /// Conservative logical charge for retained global only-prefixes and sequences.
     pub aggregation_bytes: u64,
+    pub audit: crate::RestrictionAuditLimits,
 }
 impl Default for RestrictionOptions {
     fn default() -> Self {
@@ -30,6 +31,7 @@ impl Default for RestrictionOptions {
             stage: StageOptions::default(),
             relation_access_bytes: 64 * 1024 * 1024,
             aggregation_bytes: 64 * 1024 * 1024,
+            audit: Default::default(),
         }
     }
 }
@@ -207,6 +209,26 @@ pub fn resolve_restrictions(
     output: &Path,
     options: RestrictionOptions,
 ) -> Result<RestrictionReport> {
+    let mut audit = crate::audit::AuditCollector::new(options.audit, "external_restrictions")?;
+    audit.begin(1);
+    resolve_with_audit(
+        staged, connected, edges, adjacency, output, options, &mut audit,
+    )
+    .map_err(|mut error| {
+        audit.attach(&mut error.report);
+        error
+    })
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_with_audit(
+    staged: &Path,
+    connected: &Path,
+    edges: &Path,
+    adjacency: &Path,
+    output: &Path,
+    options: RestrictionOptions,
+    audit: &mut crate::audit::AuditCollector,
+) -> Result<RestrictionReport> {
     if options.stage.record_bytes == 0
         || options.stage.record_bytes > u32::MAX as u64
         || options.stage.run_files == 0
@@ -340,63 +362,69 @@ pub fn resolve_restrictions(
         limit: options.aggregation_bytes,
     };
     let mut stats = edge_report.diagnostics.clone();
-    let mut failures = Vec::new();
-    source.visit(|record| {
-        let Record::Relation(rel) = record else {
-            return Ok(());
-        };
-        if value(&rel.tags, "type") != "restriction" {
-            return Ok(());
-        }
-        if !restrictions::applies(&rel) {
-            let key = if value(&rel.tags, "except")
-                .split(';')
-                .any(|v| matches!(v.trim(), "motorcar" | "motor_vehicle" | "vehicle"))
-            {
-                "excepted_restrictions"
-            } else {
-                "other_mode_restrictions"
+    let start = audit.records.len();
+    source
+        .visit(|record| {
+            let Record::Relation(rel) = record else {
+                return Ok(());
             };
-            count(&mut stats, key);
-            return Ok(());
-        }
-        if restrictions::conditional(&rel) {
-            return Ok(());
-        }
-        access.budget = AccessBudget::new(options.relation_access_bytes);
-        access.cached_way = None;
-        match restrictions::resolve_with(&rel, &mut access) {
-            Ok(Some((rule, sequences))) => {
-                for sequence in sequences {
-                    if rule.starts_with("only_") {
-                        for split in 1..sequence.len() {
-                            aggregation.allow(&sequence[..split], sequence[split])?;
+            if value(&rel.tags, "type") != "restriction" {
+                return Ok(());
+            }
+            if !restrictions::applies(&rel) {
+                let key = if value(&rel.tags, "except")
+                    .split(';')
+                    .any(|v| matches!(v.trim(), "motorcar" | "motor_vehicle" | "vehicle"))
+                {
+                    "excepted_restrictions"
+                } else {
+                    "other_mode_restrictions"
+                };
+                count(&mut stats, key);
+                return Ok(());
+            }
+            if restrictions::conditional(&rel) {
+                return Ok(());
+            }
+            access.budget = AccessBudget::new(options.relation_access_bytes);
+            access.cached_way = None;
+            match restrictions::resolve_with(&rel, &mut access) {
+                Ok(Some((rule, sequences))) => {
+                    for sequence in sequences {
+                        if rule.starts_with("only_") {
+                            for split in 1..sequence.len() {
+                                aggregation.allow(&sequence[..split], sequence[split])?;
+                            }
+                        } else {
+                            aggregation.forbid(&sequence)?;
                         }
-                    } else {
-                        aggregation.forbid(&sequence)?;
                     }
+                    count(&mut stats, "resolved_restrictions");
                 }
-                count(&mut stats, "resolved_restrictions");
-            }
-            Ok(None) => count(&mut stats, "non_driving_restrictions"),
-            Err(ResolveError::Diagnostic(diagnostic)) => {
-                if failures.len() >= 256 {
-                    return Err(routeweft_dataset::Error::LimitExceeded.into());
+                Ok(None) => count(&mut stats, "non_driving_restrictions"),
+                Err(ResolveError::Diagnostic(diagnostic)) => {
+                    audit.push(*diagnostic)?;
                 }
-                failures.push(*diagnostic);
+                Err(ResolveError::Access(error)) => return Err(error),
             }
-            Err(ResolveError::Access(error)) => return Err(error),
-        }
-        Ok(())
-    })?;
-    if !failures.is_empty() {
+            Ok(())
+        })
+        .map_err(|mut error| {
+            error.report.nodes = edge_report.nodes as usize;
+            error.report.edges = edge_report.edges as usize;
+            error.report.diagnostics = stats.clone();
+            error.report.source_sha256 = source.report.source_sha256.clone();
+            error.report.source_snapshot = source.report.source_snapshot;
+            error
+        })?;
+    audit.complete();
+    if audit.records.len() > start {
         return Err(Error {
             source: invalid("invalid driving restrictions"),
             report: Box::new(InputReport {
                 nodes: edge_report.nodes as usize,
                 edges: edge_report.edges as usize,
                 diagnostics: stats,
-                restriction_diagnostics: failures,
                 failure_code: Some("InvalidRestriction".into()),
                 source_sha256: source.report.source_sha256.clone(),
                 source_snapshot: source.report.source_snapshot,

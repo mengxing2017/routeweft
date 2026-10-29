@@ -1,5 +1,6 @@
 //! Convert completed, authenticated external graph artifacts to a final v2 dataset.
 use super::BlockWaysReport;
+use crate::audit::{validate_audit, BLOCKWAYS_MANIFEST_MAX_BYTES};
 use crate::{InputReport, InvalidRestrictionPolicy, Result};
 use routeweft_dataset::{
     hash, hash_file, invalid, write_binary_streaming, BinaryMetadata, BinarySource,
@@ -47,16 +48,30 @@ impl Source {
     fn open(directory: &Path) -> DataResult<Self> {
         let mut bytes = Vec::new();
         regular(&directory.join("manifest.json"))?
-            .take(1024 * 1024 + 1)
+            .take(BLOCKWAYS_MANIFEST_MAX_BYTES + 1)
             .read_to_end(&mut bytes)?;
-        if bytes.len() > 1024 * 1024 {
-            return Err(invalid("publication source manifest size"));
+        if bytes.len() as u64 > BLOCKWAYS_MANIFEST_MAX_BYTES {
+            return Err(routeweft_dataset::resource_limit(
+                "blockways_manifest_bytes",
+                BLOCKWAYS_MANIFEST_MAX_BYTES,
+                bytes.len() as u64,
+                "publication_source",
+            ));
         }
         let report: BlockWaysReport =
             serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+        match report.format_version {
+            1 if bytes.len() <= 1024 * 1024 && report.restriction_diagnostics.len() <= 256 => {}
+            2 => {
+                validate_audit(&report.restriction_audit, &report.restriction_diagnostics)?;
+                if report.attempts != report.restriction_audit.attempt as u64 {
+                    return Err(invalid("publication audit attempts mismatch"));
+                }
+            }
+            _ => return Err(invalid("publication audit format or legacy limits")),
+        }
         let defaults = report.graph_capacity.limits();
-        if report.format_version != 1
-            || !report.restrictions_resolved
+        if !report.restrictions_resolved
             || report.nodes == 0
             || report.nodes > defaults.max_nodes as u64
             || report.edges > defaults.max_edges as u64
@@ -68,7 +83,6 @@ impl Source {
                     || !report.restriction_diagnostics.is_empty()
                     || report.attempts != 1))
             || report.blocked_way_ids.len() > 32768
-            || report.restriction_diagnostics.len() > 256
             || report.blocked_way_ids.windows(2).any(|w| w[0] >= w[1])
         {
             return Err(invalid("publication requires a completed BlockWays source"));
@@ -215,7 +229,9 @@ impl BinarySource for Source {
         }
         let manifest = self.directory.join("manifest.json");
         let file = regular(&manifest)?;
-        if file.metadata()?.len() > 1024 * 1024 || hash_file(&manifest)? != self.manifest_sha256 {
+        if file.metadata()?.len() > BLOCKWAYS_MANIFEST_MAX_BYTES
+            || hash_file(&manifest)? != self.manifest_sha256
+        {
             return Err(invalid("publication source manifest changed"));
         }
         for name in FILES {
@@ -364,6 +380,7 @@ pub fn publish_block_ways(
         restrictions: report.restrictions as usize,
         diagnostics: report.diagnostics.clone(),
         restriction_diagnostics: report.restriction_diagnostics.clone(),
+        restriction_audit: report.restriction_audit.clone(),
         blocked_way_ids: report.blocked_way_ids.clone(),
     };
     match result {
@@ -388,6 +405,28 @@ mod tests {
         let output = parent.join("ready");
         super::super::prepare_block_ways(&staged, &output, Default::default()).unwrap();
         output
+    }
+    #[test]
+    fn accepts_legacy_manifest_and_rejects_forged_new_audit() {
+        let parent = temporary();
+        let ready = ready(&parent);
+        let path = ready.join("manifest.json");
+        let bytes = fs::read(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["format_version"] = 1.into();
+        value.as_object_mut().unwrap().remove("restriction_audit");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        Source::open(&ready).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["restriction_audit"]["records_retained"] = 1.into();
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(Source::open(&ready).is_err());
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["restriction_audit"]["limits"]["max_diagnostics"] = 100_000.into();
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(Source::open(&ready).is_err());
+        fs::remove_dir_all(parent).unwrap();
     }
     #[test]
     fn rejects_payload_corruption_unknown_paths_and_child_identity_mismatch() {
