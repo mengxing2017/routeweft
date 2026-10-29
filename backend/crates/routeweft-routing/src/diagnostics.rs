@@ -35,6 +35,8 @@ pub struct QueryDiagnostics {
     pub snap_fallbacks: usize,
     pub scanned_edges: usize,
     pub relaxed_shortcuts: usize,
+    /// Original edge sequence replayed through the restriction automaton after unpacking.
+    pub validated_route_edges: usize,
     pub queue_peak: usize,
     pub failure: Option<BudgetFailure>,
 }
@@ -72,6 +74,7 @@ impl<'a, 'b> Context<'a, 'b> {
                 snap_fallbacks: 0,
                 scanned_edges: 0,
                 relaxed_shortcuts: 0,
+                validated_route_edges: 0,
                 queue_peak: 0,
                 failure: None,
             },

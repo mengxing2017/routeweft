@@ -751,6 +751,9 @@ impl Engine {
         let mut leg_start = 0;
         let mut prev_edge = None;
         let mut roundabout_exit = 0;
+        let mut validated_previous: Option<Traversal> = None;
+        let mut validated_state = 0;
+        let mut recovered_cost = 0u64;
         // Coincident waypoints consumed at the source produce explicit zero legs.
         for _ in 1..cursor.stage {
             legs.push(Leg {
@@ -764,8 +767,30 @@ impl Engine {
         for (arc, before, after) in traversals {
             ctx.tick()?;
             let e = &self.graph.edges[arc.edge];
+            if arc.end > arc.start {
+                let continuation =
+                    validated_previous.is_some_and(|p| p.edge == arc.edge && p.end == arc.start);
+                if let Some(previous) = validated_previous {
+                    if !continuation
+                        && (previous.end != 1.
+                            || arc.start != 0.
+                            || self.graph.edges[previous.edge].to != e.from)
+                    {
+                        return Err(Error::InvalidDataset);
+                    }
+                }
+                if !continuation {
+                    validated_state = self
+                        .restrictions
+                        .step(validated_state, arc.edge)
+                        .ok_or(Error::InvalidDataset)?;
+                    ctx.diagnostics.validated_route_edges += 1;
+                }
+                validated_previous = Some(arc);
+            }
             let d = scaled(e.distance_mm, arc.end - arc.start)?;
             let t = scaled(e.duration_ms, arc.end - arc.start)?;
+            recovered_cost = recovered_cost.checked_add(t).ok_or(Error::CostOverflow)?;
             total_distance = total_distance.checked_add(d).ok_or(Error::CostOverflow)?;
             leg_distance = leg_distance.checked_add(d).ok_or(Error::CostOverflow)?;
             leg_time = leg_time.checked_add(t).ok_or(Error::CostOverflow)?;
@@ -840,7 +865,7 @@ impl Engine {
             geometry_end: last,
             exit: None,
         });
-        if legs.len() != matches.len() - 1 {
+        if legs.len() != matches.len() - 1 || recovered_cost != cost {
             return Err(Error::InvalidDataset);
         }
         Ok(RouteResult {
