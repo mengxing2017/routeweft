@@ -11,10 +11,19 @@ fn command(args: &[&str]) -> (i32, Value) {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    (
-        out.status.code().unwrap(),
-        serde_json::from_slice(&out.stdout).unwrap(),
-    )
+    let mut value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Format/builder equivalence compares semantic output and work counters;
+    // elapsed times are intentionally nondeterministic between CLI invocations.
+    if let Some(object) = value.as_object_mut() {
+        object.remove("load_ms");
+        object.remove("load_diagnostics");
+        if let Some(diagnostics) = object.get_mut("diagnostics").and_then(Value::as_object_mut) {
+            for key in ["elapsed_ms", "snap_ms", "search_ms", "recover_ms"] {
+                diagnostics.remove(key);
+            }
+        }
+    }
+    (out.status.code().unwrap(), value)
 }
 fn temp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
