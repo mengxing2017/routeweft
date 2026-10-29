@@ -224,6 +224,10 @@ pub fn audit_staged_restrictions(
                             Err(d) => { classification=d.code.clone(); diagnostic=Some(d); },
                         }
                     },
+                    Err(error) if matches!(&error.source, routeweft_dataset::Error::InvalidDataset(message) if message == "no driving roads") => {
+                        classification="no_retained_member_way".into();
+                        issues.push("NoEffectiveDirectedEdges");
+                    },
                     Err(error) => { classification="member_graph_error".into(); issues.push("MemberGraphBuildFailed");
                         states.push(serde_json::json!({"graph_error":error.to_string()})); },
                 }
