@@ -202,10 +202,10 @@ pub fn check_resident_budget(m: &Manifest, limits: LoadOptions, indexes: bool) -
         .saturating_mul(2 * (4096 + 4 + 64))
         .min(256 * 1024 * 1024);
     let estimated = (nodes as u64)
-        .checked_mul(if indexes { 48 } else { 32 })
+        .checked_mul(if indexes { 128 } else { 32 })
         .and_then(|n| {
             (edges as u64)
-                .checked_mul(if indexes { 512 } else { 256 })
+                .checked_mul(if indexes { 576 } else { 256 })
                 .and_then(|e| n.checked_add(e))
         })
         .and_then(|n| {
