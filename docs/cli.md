@@ -47,6 +47,10 @@ routeweft build --input city.osm.pbf --profile driving --output city-external/ \
 
 可选 `--build-timeout-ms` 设置协作式截止时间，0 表示立即截止；只在阶段边界和最终提交前检查，不中断正在运行的阶段，因此不能作为硬超时。上述 scratch/构建时限参数只用于 external，内存模式使用它们会被拒绝。强制终止或断电可能留下私有工作目录或目标预占空目录；当前无自动恢复。最终 rename 后的目录 sync 错误可能返回失败但留下完整目标，重试前应检查已有目标。
 
+`--progress off|json` 仅适用于 external，默认 `off`。`json` 在 stderr 输出 JSONL 事件（`event=build_progress`），stdout 仍只有最终 schema 1 结果或错误。字段包括 `stage`、`attempt`（暂存为 0）、`completed` 和 `elapsed_ms`；completed 的单位由阶段决定：staging_records 为已读对象数、way_closure 为已检查道路数、edges 为已连接节点数、adjacency/complete 为边数、restriction_scan_complete 为累计审计条数，其他阶段开始事件为 0。`diagnostics_observed` 是累计诊断计数，`scratch_peak_bytes` 按 `scratch_scope` 区分 staging、restrictions、blockways 私有阶段或 build_checkpoints 处观测的构建资源峰值，不是 RSS，也不是统一全局实时用量。`cancellation_checkpoint=true` 仅标记协调器确实完成取消/截止检查的边界事件；阶段事件不意味着新增取消检查点，超时仍是上述协作式边界检查。
+
+外部构建报告的 `build_metrics` 独立于语义诊断和数据集 manifest，包含暂存/总耗时、每轮 connection/edges/adjacency/restrictions 耗时及新增排除数。`build_way_closure_*` 衡量最近一次完整原始 way 引用闭包检查：节点查找数、二分行探测数、缓存未命中后的文件行读取次数/字节及耗时（不等于块设备 I/O）。查找使用每表 4096 组、每组 4 行的固定缓存（每行 48 字节，含索引/替换元数据共 1 MiB/表），只读取实际探测行，不预读大页；relation access 仍按每次逻辑行探测计费，缓存命中不绕过预算。这些计数不能单独证明整次构建的性能瓶颈。
+
 external 使用独立的累计解码工作量预算；单块、输入及图上限继续适用。字典和限制聚合有内存预算，加载与查询仍驻内存；该模式不构成省域或 3 GiB 输入支持声明。
 
 ### 显式大图容量档位
