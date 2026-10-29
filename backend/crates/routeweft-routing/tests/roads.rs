@@ -604,7 +604,7 @@ fn multilevel_metrics_match_dijkstra_with_restrictions_splits_and_waypoints() {
             .customize(CustomizationOptions {
                 leaf_nodes: 8,
                 fanout: 4,
-                levels: 3,
+                levels: 3 + seed % 2,
                 max_boundary: 64,
                 ..Default::default()
             })
@@ -1085,4 +1085,25 @@ fn bidirectional_restriction_graph_preserves_ten_waypoint_history_and_clique_pru
         assert_eq!(b.legs.len(), count - 1);
     }
     assert!(skips > 0);
+}
+
+#[test]
+fn coverage_reports_directed_components_and_exclusion_residue() {
+    let engine = engine(
+        (0..6).map(|i| p(i as f64 * 0.001, 0.)).collect(),
+        vec![e(0, 1, 1), e(1, 0, 1), e(1, 2, 1), e(3, 4, 1), e(4, 3, 1)],
+        vec![],
+    );
+    let coverage = engine.coverage(&[1]).unwrap();
+    assert_eq!(
+        (coverage.weak_components, coverage.largest_weak_nodes),
+        (3, 3)
+    );
+    assert_eq!(
+        (coverage.strong_components, coverage.largest_strong_nodes),
+        (4, 2)
+    );
+    assert_eq!(coverage.excluded_way_edges, 5);
+    assert_eq!(engine.coverage(&[2]).unwrap().excluded_way_edges, 0);
+    assert!(matches!(engine.coverage(&[2, 1]), Err(Error::InvalidInput)));
 }
