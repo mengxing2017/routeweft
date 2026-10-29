@@ -180,9 +180,24 @@ fn persisted_metric_binds_to_dataset_rejects_corruption_and_preserves_previous_o
 fn customize_cli_and_resident_requests_report_independent_limits_without_reloading() {
     let path = fixture();
     let dataset = path.to_str().unwrap();
-    let (code, value) = run(&["customize", "--dataset", dataset]);
+    let (code, value) = run(&[
+        "customize",
+        "--dataset",
+        dataset,
+        "--levels",
+        "4",
+        "--max-boundary",
+        "512",
+        "--max-shortcuts",
+        "40000000",
+        "--max-index-bytes",
+        "4294967296",
+    ]);
     assert_eq!(code, 0, "{value}");
     assert_eq!(value["acceleration"]["algorithm"], "mld");
+    assert_eq!(value["acceleration"]["levels"], 4);
+    let (invalid_code, _) = run(&["customize", "--dataset", dataset, "--levels", "5"]);
+    assert_ne!(invalid_code, 0);
     for (flags, reason) in [
         (["--max-states", "1"], "states"),
         (["--max-work", "0"], "work"),
