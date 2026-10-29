@@ -39,3 +39,11 @@ InputReport 是构建审计，不是可传给查询引擎的路由图。保存�
 `build_with_options` 和 `routeweft_dataset::write` 默认生成 v1。显式选择二进制可调用 `build_with_format(input, output, options, routeweft_dataset::DatasetFormat::BinaryV2)`，已有 Graph 可调用 `routeweft_dataset::write_with_format`。两者保留原有审计与不可变发布规则；v2 不改变 Engine 的驻内存模型。格式契约见 [Dataset v2](dataset-format-v2.md)。
 
 显式磁盘构建可调用 `routeweft_preprocess::staging::build_external(input, output, scratch_parent, ExternalBuildOptions, ExternalBuildControl)`，返回 `ExternalBuildResult { manifest, report, resources }`，只生成 v2。全局磁盘预算使用 `options.stage.scratch_bytes/run_files`，另可配置字典、校验及限制工作集预算。`ExternalBuildControl` 接受可选的 `AtomicBool` 取消标记和 `Instant` 截止时间，只在阶段边界/最终提交前检查，不会中断当前阶段。scratch 和输出须在同一文件系统，输入与父目录在调用期间保持不变；具体预算和失败清理契约见 [磁盘构建](cli.md#显式磁盘构建)。原有 build API 继续使用内存路径；两种模式都不扩大现有输入/图上限或改变 Engine 的驻内存模型。
+
+### 构建审计配置与兼容
+
+`BuildOptions.restriction_audit: RestrictionAuditLimits` 控制累计审计数量（默认 4096）、序列化预算（默认 16 MiB）和 BlockWays 总构图轮数（默认 64）。调用 `validate()` 可提前校验；`prepare`、PBF 构建及 external 入口也校验。推荐使用 `..Default::default()` 初始化其余选项。直接使用 `RestrictionOptions` 的调用者通过 `audit` 配置同一限制，外部构建通过 `ExternalBuildOptions.build.restriction_audit` 透传。
+
+`InputReport.restriction_audit: RestrictionAuditSummary` 提供实际限额、扫描完整性、观察数/保留数和保守计费；`RestrictionDiagnostic.attempt` 记录轮次。观测计数不是唯一关系总数，提前停止时仅为下界。原 JSON schema=1 和原字段保留，新字段为增量；Rust 结构体字面量需要增加字段或采用 Default。这次 API 增量随新的预发布版本发布，不复用已上传版本。
+
+独立 publication 读取器支持 BlockWays v1/v2 中间 manifest，v2 固定硬边界不相信文件自报的较大限额；最终 dataset graph 格式不变。审计逻辑内存预算不是 RSS，错误仍需匹配 resource 与完整性标记，不能因为 restriction_diagnostics 非空就忽略资源失败。
