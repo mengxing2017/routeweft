@@ -100,13 +100,15 @@ impl Engine {
             if best.is_some_and(|(upper, _)| a as u128 + b as u128 >= upper as u128) {
                 break;
             }
-            // Alternation prevents an ocean of zero-cost overlay arcs from starving
-            // the other direction; unequal minima still favour the smaller label.
-            let side = if a == b {
+            // Expand the smaller frontier. Cost minima alone over-expand dense
+            // urban cells when the other endpoint is in a sparse road network.
+            // Each side still pops its own minimum; the lower-bound stopping
+            // rule above is independent of this scheduling choice.
+            let side = if q[0].len() == q[1].len() {
                 turn ^= 1;
                 turn
             } else {
-                usize::from(b < a)
+                usize::from(q[1].len() < q[0].len())
             };
             let Reverse((cost, s)) = q[side].pop().unwrap();
             ctx.tick()?;
