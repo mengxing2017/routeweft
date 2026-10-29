@@ -17,6 +17,10 @@ Git checkout 自动采集整个仓库（含未忽略的未跟踪文件）的状�
 | verify | --dataset | 完整校验后返回 verified=true 与 manifest |
 | nearest | --dataset、--coordinate lon,lat | 返回有限方向候选及 dataset/profile/format |
 | route | --dataset、--coordinates lon,lat;lon,lat | 返回几何、米/秒成本、分段、步骤、吸附位置及身份 |
+| customize | --dataset | 离线生成可选 routing.mld，加速 v1/v2 查询；支持 --graph-capacity、--max-load-bytes、--max-work、--timeout-ms |
+| serve | --dataset | 常驻加载一次，stdin/stdout JSONL 串行查询；先输出 ready，EOF 退出 |
+
+长距离场景应在 build 后执行 customize；默认 auto 自动使用有效的加速文件，`route --algorithm dijkstra` 保留基线。查询新增分阶段诊断和具体预算失败原因，kind 保持兼容。命令、升级与常驻协议详见[路由加速](routing-acceleration.md)。
 
 可选二进制存储：
 
@@ -191,3 +195,5 @@ block_ways 排除无效关系中已存在的全部 way 成员，并迭代复核�
 完整审计位于 CLI report，不新增 dataset v1 必需字段。请保存 build-result.json 并随构建回执分发；manifest.diagnostics 只保存计数，不包含关系级完整审计。库调用者使用 build_with_options/prepare/preflight 及结构化 Error.report；默认 build/graph 仍严格拒绝。
 
 external 的流水线、源文件复核及发布错误也保留 `error.details`；通用 failure_code 为 ExternalBuildError，最终数据集写入为 DatasetPublicationError，输入变化为 SourceChanged，阶段截止/取消为 BuildTimeout/BuildCancelled。静态限制仍使用 InvalidRestriction 及关系级诊断。早期失败可能尚无来源摘要；各阶段资源错误按 error.resource 分型。源关系按 ID 排序处理，未排序 PBF 的诊断列表次序可能与内存模式不同，关系身份与处理策略保持。
+
+2026-10-29 算法升级：加速文件为 `RWFTML02`，旧 `RWFTML01` 需重新执行 customize；基础地图不需重新导入。auto 使用双向限制状态查询、图割分区与度二链压缩。route 的小分量替代吸附受原吸附半径约束，并通过 diagnostics.snap_fallbacks 报告；nearest 返回实际最近候选。完整语义与资源上限见[加速指南](routing-acceleration.md)。
