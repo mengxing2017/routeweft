@@ -128,12 +128,13 @@ impl Index {
         }
         result
     }
+    pub(crate) fn closed_level(&self, node: usize, open: &[HashSet<usize>]) -> Option<usize> {
+        (0..self.levels.len()).rev().find(|&l| {
+            self.levels[l].usable[self.cell(l, node)] && !open[l].contains(&self.cell(l, node))
+        })
+    }
     pub(crate) fn active(&self, node: usize, open: &[HashSet<usize>]) -> bool {
-        (0..self.levels.len())
-            .rev()
-            .find(|&l| {
-                self.levels[l].usable[self.cell(l, node)] && !open[l].contains(&self.cell(l, node))
-            })
+        self.closed_level(node, open)
             .is_none_or(|l| self.boundary[node] as usize > l)
     }
     pub(crate) fn node(&self, vertex: usize, automaton: usize) -> Option<usize> {
@@ -148,6 +149,30 @@ impl Index {
     pub(crate) fn original(&self, edge: usize) -> usize {
         self.topology.edges[edge].original
     }
+    /// Enumerate only the metric CSR. Reverse query search handles original
+    /// incoming edges separately; enumerating them once per level is redundant.
+    pub(crate) fn visit_shortcuts(
+        &self,
+        node: usize,
+        level: usize,
+        reverse: bool,
+        mut visit: impl FnMut(Link) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let metric = if reverse {
+            &self.reverse[level]
+        } else {
+            &self.levels[level]
+        };
+        for arc in &metric.arcs[metric.offsets[node] as usize..metric.offsets[node + 1] as usize] {
+            visit(Link {
+                to: arc.to as usize,
+                cost: arc.cost,
+                edge: 0,
+                level: Some(level),
+            })?;
+        }
+        Ok(())
+    }
     /// A clique need not be re-entered after arriving through that SAME clique.
     pub(crate) fn visit(
         &self,
@@ -158,21 +183,7 @@ impl Index {
         mut visit: impl FnMut(Link) -> Result<(), Error>,
     ) -> Result<(), Error> {
         if let Some(level) = level.filter(|_| !skip_clique) {
-            let metric = if reverse {
-                &self.reverse[level]
-            } else {
-                &self.levels[level]
-            };
-            for arc in
-                &metric.arcs[metric.offsets[node] as usize..metric.offsets[node + 1] as usize]
-            {
-                visit(Link {
-                    to: arc.to as usize,
-                    cost: arc.cost,
-                    edge: 0,
-                    level: Some(level),
-                })?;
-            }
+            self.visit_shortcuts(node, level, reverse, &mut visit)?;
         }
         let ids = if reverse {
             &self.topology.incoming[node]

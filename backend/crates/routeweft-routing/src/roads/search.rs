@@ -255,7 +255,11 @@ impl Engine {
             } else {
                 // The transpose cannot just use query_level(node): incoming
                 // shortcuts may originate at a different query level.
-                for l in 0..open.len() {
+                // A lower-level clique stays within this closed ancestor.
+                // Every active origin in it must use at least the ancestor's
+                // level, so lower metrics cannot contain an incoming query arc.
+                // Avoid scanning those CSR rows only to reject every entry.
+                for l in index.closed_level(node, open).unwrap_or(0)..open.len() {
                     if open[l].contains(&index.cell(l, node)) {
                         continue;
                     }
@@ -263,7 +267,7 @@ impl Engine {
                         ctx.diagnostics.clique_skips += 1;
                         continue;
                     }
-                    index.visit(node, Some(l), true, false, |link| {
+                    index.visit_shortcuts(node, l, true, |link| {
                         ctx.tick()?;
                         if link.level.is_none()
                             || !index.active(link.to, open)
