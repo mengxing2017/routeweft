@@ -632,6 +632,48 @@ mod tests {
     use routeweft_dataset::Point;
     use std::io::{BufRead, BufReader};
 
+    #[test]
+    fn row_cache_preserves_lookup_results_and_logical_budget() {
+        let parent = temporary();
+        let path = parent.join("table");
+        let count = 20_000u64;
+        let mut bytes = vec![0; 16];
+        for id in 0..count {
+            for value in [key(id as i64 * 2), id, 0, 0, 0, 0] {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        fs::write(&path, &bytes).unwrap();
+        let run = DiskRun {
+            path,
+            count,
+            bytes: bytes.len() as u64,
+            digest: String::new(),
+        };
+        let mut table = Table::open(&run).unwrap();
+        for id in -1..=40_000 {
+            let result = table.find(id, &mut AccessBudget::new(u64::MAX)).unwrap();
+            assert_eq!(
+                result.map(|r| r[1]),
+                ((0..40_000).contains(&id) && id % 2 == 0).then_some((id / 2) as u64)
+            );
+        }
+        let reads = table.reads;
+        let expected = table.find(2, &mut AccessBudget::new(u64::MAX)).unwrap();
+        assert!(expected.is_some());
+        assert!(table.find(2, &mut AccessBudget::new(WIDTH - 1)).is_err());
+        assert!(reads < table.probes / 2);
+        assert_eq!(table.read_bytes, table.reads * WIDTH);
+        assert!(table.read_bytes <= table.probes * WIDTH);
+        assert_eq!(
+            std::mem::size_of::<CachedRow>() * CACHE_SETS * CACHE_WAYS,
+            1024 * 1024
+        );
+        assert_eq!(table.cache.len(), CACHE_SETS);
+        assert!(table.cache.iter().all(|set| set.len() == CACHE_WAYS));
+        fs::remove_dir_all(parent).unwrap();
+    }
+
     fn fixture() -> Osm {
         let mut osm = Osm::default();
         for id in -2..=8 {

@@ -109,7 +109,17 @@ fn invalid_maxspeed_requires_opt_in_and_matches_both_builders() {
             "use_default",
         ]);
         assert_eq!(code, 0, "{built}");
-        assert_eq!(built["report"], preflight["report"]);
+        let mut actual_report = built["report"].clone();
+        let mut expected_report = preflight["report"].clone();
+        actual_report
+            .as_object_mut()
+            .unwrap()
+            .remove("build_metrics");
+        expected_report
+            .as_object_mut()
+            .unwrap()
+            .remove("build_metrics");
+        assert_eq!(actual_report, expected_report);
         assert_eq!(built["report"]["maxspeed_policy"], "use_default");
         assert_eq!(
             built["report"]["maxspeed_diagnostics"]
@@ -137,7 +147,7 @@ fn invalid_maxspeed_requires_opt_in_and_matches_both_builders() {
         ]);
         assert_eq!(code, 0, "{route}");
         results.push((
-            built["report"].clone(),
+            actual_report,
             route,
             std::fs::read(output.join("graph.bin")).unwrap(),
         ));
@@ -788,6 +798,15 @@ fn explicit_external_builder_matches_memory_v2_and_queries_for_both_policies() {
             results.push(response);
         }
         assert_eq!(results[0]["manifest"], results[1]["manifest"]);
+        // Physical I/O measurements are intentionally external-builder specific.
+        results[0]["report"]
+            .as_object_mut()
+            .unwrap()
+            .remove("build_metrics");
+        results[1]["report"]
+            .as_object_mut()
+            .unwrap()
+            .remove("build_metrics");
         assert_eq!(results[0]["report"], results[1]["report"]);
         for file in ["graph.bin", "manifest.json"] {
             assert_eq!(
@@ -1095,5 +1114,137 @@ fn audit_cli_options_fail_early_and_preserve_structured_errors() {
         assert_eq!(report["source_sha256"].as_str().unwrap().len(), 64);
         assert!(!output.exists());
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn external_progress_is_opt_in_jsonl_on_stderr() {
+    let root = temp("routeweft-progress");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("input.pbf");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    let output = root.join("dataset");
+    let result = Command::new(env!("CARGO_BIN_EXE_routeweft"))
+        .args([
+            "build",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--builder",
+            "external",
+            "--format",
+            "2",
+            "--progress",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let _: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let events: Vec<Value> = String::from_utf8(result.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events.len() >= 7);
+    assert_eq!(events.first().unwrap()["stage"], "staging");
+    assert_eq!(events.last().unwrap()["stage"], "complete");
+    assert!(events
+        .iter()
+        .any(|v| v["stage"] == "commit" && v["cancellation_checkpoint"] == true));
+    assert!(events.iter().all(|v| v["diagnostics_observed"].is_u64()
+        && v["scratch_peak_bytes"].is_u64()
+        && v["scratch_scope"].as_str().is_some_and(|s| !s.is_empty())));
+    assert!(events
+        .iter()
+        .all(|v| v["event"] == "build_progress" && v["elapsed_ms"].is_u64()));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Opt-in fixed-input provincial regression. Rejection is the required outcome:
+/// missing member roles must never be guessed to produce a routable dataset.
+#[test]
+#[ignore = "requires ROUTEWEFT_GUANGDONG_PBF and a full external provincial build"]
+fn guangdong_fixed_sha_reports_conservative_blocker_without_publication() {
+    let input = PathBuf::from(std::env::var("ROUTEWEFT_GUANGDONG_PBF").unwrap());
+    assert_eq!(
+        routeweft_dataset::hash_file(&input).unwrap(),
+        "d942222ce826fb3c1294d697ae97b780e4df3ed99ebc1a3feffb6ea5dca6b19b"
+    );
+    let root = temp("routeweft-guangdong-fixed");
+    std::fs::create_dir_all(&root).unwrap();
+    let dataset = root.join("dataset");
+    let scratch = root.join("scratch");
+    let result = Command::new(env!("CARGO_BIN_EXE_routeweft"))
+        .args([
+            "build",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            dataset.to_str().unwrap(),
+            "--scratch-dir",
+            scratch.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--builder",
+            "external",
+            "--format",
+            "2",
+            "--graph-capacity",
+            "regional",
+            "--invalid-restrictions",
+            "block_ways",
+            "--invalid-maxspeed",
+            "use_default",
+            "--max-scratch-bytes",
+            "17179869184",
+            "--build-timeout-ms",
+            "3600000",
+            "--progress",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(result.status.code(), Some(4), "{report}");
+    let details = &report["error"]["details"];
+    assert_eq!(details["valid"], false);
+    assert_eq!(details["blockways_failure"]["relation_id"], 5652903);
+    assert_eq!(details["blockways_failure"]["reason"], "NoSafeFromToMember");
+    assert_eq!(details["blockways_failure"]["recoverable"], false);
+    assert_eq!(
+        details["restriction_diagnostics"].as_array().unwrap().len(),
+        728
+    );
+    assert_eq!(
+        details["planned_blocked_way_ids"].as_array().unwrap().len(),
+        185
+    );
+    assert!(details["applied_blocked_way_ids"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(details["nodes"], 6529301);
+    assert_eq!(details["edges"], 11938005);
+    assert!(!dataset.exists());
+    assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    assert!(String::from_utf8(result.stderr)
+        .unwrap()
+        .lines()
+        .all(|line| serde_json::from_str::<Value>(line).is_ok()));
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -1191,7 +1191,7 @@ mod tests {
         fs::remove_dir_all(parent).unwrap();
     }
     #[test]
-    fn unsafe_abort_keeps_exclusions_applied_to_earlier_diagnostics() {
+    fn unsafe_abort_preserves_plans_without_claiming_application() {
         let parent = temporary();
         let mut osm = fixture();
         osm.relations.push(relation(
@@ -1219,8 +1219,69 @@ mod tests {
             serde_json::to_value(&actual.report.restriction_diagnostics).unwrap(),
             serde_json::to_value(&expected.report.restriction_diagnostics).unwrap()
         );
-        // The coordinator preserves partial exclusion context even on an unsafe abort.
         assert_eq!(actual.report.blocked_way_ids, vec![20, 40]);
+        assert_eq!(actual.report.planned_blocked_way_ids, vec![20, 40]);
+        assert!(actual.report.applied_blocked_way_ids.is_empty());
+        assert_eq!(
+            actual.report.planned_blocked_way_ids,
+            expected.report.planned_blocked_way_ids
+        );
+        let blocker = actual.report.blockways_failure.as_ref().unwrap();
+        assert_eq!(blocker.relation_id, 2);
+        assert_eq!(blocker.reason, "ReferencedWayAbsent");
+        assert_eq!(blocker.attempt, 1);
+        assert!(!blocker.recoverable);
+        assert!(actual
+            .to_string()
+            .contains("relation 2: ReferencedWayAbsent"));
+        assert!(!output.exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn guangdong_empty_roles_fail_closed_in_both_builders() {
+        let parent = temporary();
+        let mut osm = fixture();
+        // Both members exist and affect the driving graph, as in the real input.
+        for (original, id) in [(10, 1196383222), (30, 220883467)] {
+            let mut way = osm.ways.remove(&original).unwrap();
+            way.id = id;
+            osm.ways.insert(id, way);
+        }
+        osm.relations.push(relation(
+            1,
+            "no_right_turn",
+            &[(1, 20, "from"), (1, 40, "to")],
+        ));
+        osm.relations.push(relation(
+            5652903,
+            "no_right_turn",
+            &[(1, 1196383222, ""), (1, 220883467, "")],
+        ));
+        let staged = source(&parent, &osm);
+        let output = parent.join("ready");
+        let memory = crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: InvalidRestrictionPolicy::BlockWays,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let disk = prepare_block_ways(&staged, &output, BlockWaysOptions::default()).unwrap_err();
+        for error in [&memory, &disk] {
+            let blocker = error.report.blockways_failure.as_ref().unwrap();
+            assert_eq!(blocker.relation_id, 5652903);
+            assert_eq!(blocker.reason, "NoSafeFromToMember");
+            assert!(blocker.members.iter().all(|m| m.role.is_empty()));
+            assert_eq!(error.report.planned_blocked_way_ids, vec![20, 40]);
+            assert!(error.report.applied_blocked_way_ids.is_empty());
+            assert!(!error.report.valid);
+            assert_eq!(error.report.restriction_audit.attempt, 1);
+        }
+        assert_eq!(
+            serde_json::to_value(&memory.report.blockways_failure).unwrap(),
+            serde_json::to_value(&disk.report.blockways_failure).unwrap()
+        );
         assert!(!output.exists());
         fs::remove_dir_all(parent).unwrap();
     }
