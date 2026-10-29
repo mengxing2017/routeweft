@@ -347,21 +347,37 @@ impl Source {
         };
         Ok(Self { run, report, limit })
     }
-    fn visit(&self, mut visitor: impl FnMut(Record) -> Result<()>) -> Result<()> {
+    fn visit(&self, visitor: impl FnMut(Record) -> Result<()>) -> Result<()> {
+        self.visit_kinds(&[0, 1, 2], visitor)
+    }
+    // Header counts, ordering, lengths and the full run checksum remain checked.
+    // Staging already validated payload identities; only selected kinds need to
+    // be decoded again, avoiding millions of JSON node parses in relation scans.
+    fn visit_kinds(
+        &self,
+        kinds: &[u8],
+        mut visitor: impl FnMut(Record) -> Result<()>,
+    ) -> Result<()> {
         let reader = RunReader::open(&self.run, self.limit)?;
         let mut previous = None;
         let mut counts = [0; 3];
         let mut bytes = 16_u64;
         for entry in reader {
             let entry = entry?;
-            let record: Record =
-                serde_json::from_slice(&entry.bytes).map_err(|e| invalid(e.to_string()))?;
-            if record.key() != entry.key || previous.is_some_and(|key| key >= entry.key) {
+            if previous.is_some_and(|key| key >= entry.key) {
                 return Err(invalid("stage record identity/order").into());
             }
             previous = Some(entry.key);
             counts[entry.key.0 as usize] += 1;
             bytes += 13 + entry.bytes.len() as u64;
+            if !kinds.contains(&entry.key.0) {
+                continue;
+            }
+            let record: Record =
+                serde_json::from_slice(&entry.bytes).map_err(|e| invalid(e.to_string()))?;
+            if record.key() != entry.key {
+                return Err(invalid("stage record identity/order").into());
+            }
             if let Record::Node {
                 lon_bits, lat_bits, ..
             } = &record
