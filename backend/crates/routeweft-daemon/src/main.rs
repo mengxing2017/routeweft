@@ -100,6 +100,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     if !matches!(
         command.as_str(),
         "build"
+            | "audit-restrictions"
             | "preflight"
             | "version"
             | "inspect"
@@ -129,6 +130,12 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--max-restriction-diagnostics",
             "--max-restriction-audit-bytes",
             "--max-blockways-attempts",
+        ],
+        "audit-restrictions" => &[
+            "--input",
+            "--output",
+            "--max-scratch-bytes",
+            "--max-memory-bytes",
         ],
         "preflight" => &[
             "--input",
@@ -220,8 +227,8 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
             "build":serde_json::from_str::<Value>(include_str!(concat!(env!("OUT_DIR"), "/build-identity.json"))).expect("build identity"),
             "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
-            "commands":["build","preflight","inspect","verify","nearest","route","customize","serve","version"],
-            "invalid_restriction_policies":["reject","block_ways"],
+            "commands":["build","audit-restrictions","preflight","inspect","verify","nearest","route","customize","serve","version"],
+            "invalid_restriction_policies":["reject","block_ways","quarantine_ways"],
             "invalid_maxspeed_policies":["reject","use_default"],
             "capabilities": {
                 "builder":"in_memory", "build_modes":["memory","external"],
@@ -251,6 +258,56 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 "memory_limit_kind":"estimated_objects_not_rss"
             }}),
         );
+    }
+    if command == "audit-restrictions" {
+        let input = Path::new(required("--input")?);
+        let output = Path::new(required("--output")?);
+        let source_sha = routeweft_dataset::hash_file(input).map_err(data_error)?;
+        std::fs::create_dir(output).map_err(|e| data_error(e.into()))?;
+        let summary_path = output.join("summary.json");
+        std::fs::write(&summary_path, b"{\"complete\":false}\n")
+            .map_err(|e| data_error(e.into()))?;
+        let number = |key, default| -> Result<u64, Failure> {
+            flags
+                .get(key)
+                .map(|v| v.parse().map_err(|_| bad(format!("invalid {key}"))))
+                .unwrap_or(Ok(default))
+        };
+        let stage = output.join("stage");
+        let result = (|| {
+            routeweft_preprocess::staging::stage(
+                input,
+                &stage,
+                routeweft_preprocess::staging::StageOptions {
+                    scratch_bytes: number("--max-scratch-bytes", 8 * 1024 * 1024 * 1024)?,
+                    ..Default::default()
+                },
+            )
+            .map_err(data_error)?;
+            let summary = routeweft_preprocess::staging::audit_staged_restrictions(
+                &stage,
+                &output.join("inventory.jsonl"),
+                &output.join("fixtures"),
+                number("--max-memory-bytes", 128 * 1024 * 1024)?,
+            )
+            .map_err(build_error)?;
+            if summary.source_sha256 != source_sha
+                || routeweft_dataset::hash_file(input).map_err(data_error)? != source_sha
+            {
+                return Err(bad("audit input changed"));
+            }
+            Ok(summary)
+        })();
+        if stage.exists() {
+            std::fs::remove_dir_all(&stage).map_err(|e| data_error(e.into()))?;
+        }
+        let summary = result?;
+        std::fs::write(
+            &summary_path,
+            serde_json::to_vec_pretty(&summary).map_err(|e| bad(e.to_string()))?,
+        )
+        .map_err(|e| data_error(e.into()))?;
+        return Ok(json!({"schema":1,"status":"ok","summary":summary}));
     }
     let graph_capacity = match flags.get("--graph-capacity").copied().unwrap_or("city") {
         "city" => GraphCapacity::City,
