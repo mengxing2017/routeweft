@@ -1,4 +1,9 @@
-use crate::{Error, SearchBudget};
+mod components;
+mod compression;
+mod search;
+use crate::acceleration::{AccelerationInfo, CustomizationOptions, Index, Link};
+use crate::diagnostics::Context;
+use crate::{Error, QueryOutcome, RoutingAlgorithm, SearchBudget};
 use routeweft_dataset::{Adjacency, Graph, LoadOptions, Manifest, Point};
 use routeweft_domain::model::TravelProfile;
 use rstar::{RTree, RTreeObject, AABB};
@@ -26,16 +31,16 @@ impl RTreeObject for Indexed {
     }
 }
 #[derive(Default)]
-struct Trie {
-    next: BTreeMap<usize, usize>,
+pub(crate) struct Trie {
+    pub(crate) next: BTreeMap<usize, usize>,
     fail: usize,
-    terminal: bool,
+    pub(crate) terminal: bool,
 }
-struct Restrictions {
-    nodes: Vec<Trie>,
+pub(crate) struct Restrictions {
+    pub(crate) nodes: Vec<Trie>,
 }
 impl Restrictions {
-    fn new(sequences: &[Vec<usize>]) -> Self {
+    pub(crate) fn new(sequences: &[Vec<usize>]) -> Self {
         let mut nodes = vec![Trie::default()];
         for seq in sequences {
             let mut state = 0;
@@ -66,7 +71,7 @@ impl Restrictions {
         }
         Self { nodes }
     }
-    fn step(&self, mut state: usize, edge: usize) -> Option<usize> {
+    pub(crate) fn step(&self, mut state: usize, edge: usize) -> Option<usize> {
         while state != 0 && !self.nodes[state].next.contains_key(&edge) {
             state = self.nodes[state].fail;
         }
@@ -133,12 +138,26 @@ pub struct Engine {
     pub(crate) graph: Graph,
     manifest: Manifest,
     outgoing: Adjacency,
+    incoming: crate::topology::Rows,
+    automata: HashMap<usize, Vec<usize>>,
+    components: components::Components,
+    compression: compression::Compression,
     index: RTree<Indexed>,
     cos_lat: f64,
     local_projection: bool,
     restrictions: Restrictions,
+    acceleration: Option<Index>,
+    load_diagnostics: LoadDiagnostics,
 }
-fn dataset_error(e: routeweft_dataset::Error) -> Error {
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct LoadDiagnostics {
+    pub dataset_ms: f64,
+    pub acceleration_ms: f64,
+    pub index_ms: f64,
+    pub weak_components: usize,
+    pub strong_components: usize,
+}
+pub(crate) fn dataset_error(e: routeweft_dataset::Error) -> Error {
     match e {
         routeweft_dataset::Error::Io(_) => Error::Io,
         routeweft_dataset::Error::IncompatibleFormat => Error::IncompatibleFormat,
@@ -157,6 +176,7 @@ impl Engine {
         mut options: LoadOptions,
         capacity: routeweft_dataset::GraphCapacity,
     ) -> Result<Self, Error> {
+        let started = std::time::Instant::now();
         let caps = capacity.limits();
         options.max_nodes = options.max_nodes.min(caps.max_nodes);
         options.max_edges = options.max_edges.min(caps.max_edges);
@@ -165,7 +185,24 @@ impl Engine {
         routeweft_dataset::check_resident_budget(&manifest, options, true)
             .map_err(dataset_error)?;
         let (m, g) = routeweft_dataset::open(path, options).map_err(dataset_error)?;
-        Self::from_graph_with_options(m, g, options, capacity)
+        let dataset_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
+        let acceleration = crate::acceleration::load(path, &m, &g, options)?;
+        let acceleration_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
+        let mut engine = Self::from_graph_with_options(m, g, options, capacity)?;
+        if let Some(index) = &acceleration {
+            engine.compression.set_boundaries(&engine.graph, index);
+        }
+        engine.acceleration = acceleration;
+        engine.load_diagnostics = LoadDiagnostics {
+            dataset_ms,
+            acceleration_ms,
+            index_ms: started.elapsed().as_secs_f64() * 1000.,
+            weak_components: engine.components.size.len(),
+            strong_components: engine.components.strong_count,
+        };
+        Ok(engine)
     }
     pub fn from_graph(manifest: Manifest, graph: Graph) -> Result<Self, Error> {
         Self::from_graph_with_options(
@@ -214,6 +251,20 @@ impl Engine {
         }
         let cos_lat = ((min_lat + max_lat) / 2.).to_radians().cos();
         let project = |p: Point| [p.lon.to_radians() * R * cos_lat, p.lat.to_radians() * R];
+        let incoming =
+            crate::topology::Rows::new(graph.nodes.len(), graph.edges.iter().map(|e| e.to));
+        let restrictions = Restrictions::new(&graph.forbidden);
+        let mut automata: HashMap<usize, Vec<usize>> = HashMap::new();
+        for node in &restrictions.nodes {
+            for (&e, &a) in &node.next {
+                if !restrictions.nodes[a].terminal {
+                    automata
+                        .entry(graph.edges[e].to)
+                        .or_insert_with(|| vec![0])
+                        .push(a);
+                }
+            }
+        }
         let outgoing = Adjacency::with_limits(graph.nodes.len(), &graph.edges, options)
             .map_err(dataset_error)?;
         let mut entries = Vec::new();
@@ -226,16 +277,38 @@ impl Engine {
                 ),
             });
         }
-        let restrictions = Restrictions::new(&graph.forbidden);
+        let components = components::Components::new(&graph, &outgoing, &incoming);
+        let compression = compression::Compression::new(&graph, &outgoing, &incoming);
         Ok(Self {
             graph,
             manifest,
             outgoing,
+            incoming,
+            automata,
+            components,
+            compression,
             index: RTree::bulk_load(entries),
             cos_lat,
             local_projection: capacity == routeweft_dataset::GraphCapacity::Regional,
             restrictions,
+            acceleration: None,
+            load_diagnostics: LoadDiagnostics::default(),
         })
+    }
+    /// Build an in-memory metric for embedded use and differential tests.
+    /// Persistent deployments should run the offline customize command once.
+    pub fn customize(&mut self, options: CustomizationOptions) -> Result<AccelerationInfo, Error> {
+        let index = Index::build(&self.graph, &self.outgoing, options)?;
+        let info = index.info();
+        self.compression.set_boundaries(&self.graph, &index);
+        self.acceleration = Some(index);
+        Ok(info)
+    }
+    pub fn acceleration_info(&self) -> Option<AccelerationInfo> {
+        self.acceleration.as_ref().map(Index::info)
+    }
+    pub fn load_diagnostics(&self) -> LoadDiagnostics {
+        self.load_diagnostics
     }
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
@@ -250,8 +323,16 @@ impl Engine {
         &self,
         point: Point,
         options: QueryOptions,
-        budget: &SearchBudget<'_>,
-        work: &mut usize,
+        ctx: &mut Context<'_, '_>,
+    ) -> Result<Vec<Nearest>, Error> {
+        self.nearest_component(point, options, None, ctx)
+    }
+    fn nearest_component(
+        &self,
+        point: Point,
+        options: QueryOptions,
+        component: Option<u32>,
+        ctx: &mut Context<'_, '_>,
     ) -> Result<Vec<Nearest>, Error> {
         point.coordinate().map_err(|_| Error::InvalidInput)?;
         if point.lat.abs() > 85.
@@ -266,7 +347,7 @@ impl Engine {
         if options.profile != TravelProfile::Driving {
             return Err(Error::UnsupportedProfile);
         }
-        budget.tick(work)?;
+        ctx.tick()?;
         let p = self.projected(point);
         let lat_margin = options.radius_m / R;
         let min_cos = (point.lat.to_radians().abs() + lat_margin).cos().max(0.01);
@@ -275,8 +356,11 @@ impl Engine {
         let envelope = AABB::from_corners([p[0] - dx, p[1] - dy], [p[0] + dx, p[1] + dy]);
         let mut matches = Vec::new();
         for item in self.index.locate_in_envelope_intersecting(&envelope) {
-            budget.tick(work)?;
+            ctx.tick()?;
             let e = &self.graph.edges[item.id];
+            if component.is_some_and(|c| self.components.weak[e.from] != c) {
+                continue;
+            }
             let a = self.graph.nodes[e.from];
             let b = self.graph.nodes[e.to];
             // Regional snapping uses the query latitude, avoiding distortion
@@ -329,7 +413,17 @@ impl Engine {
         options: QueryOptions,
         budget: &SearchBudget<'_>,
     ) -> Result<Vec<Nearest>, Error> {
-        self.nearest_work(point, options, budget, &mut 0)
+        self.nearest_work(point, options, &mut Context::new(budget, false))
+    }
+    pub fn nearest_detailed(
+        &self,
+        point: Point,
+        options: QueryOptions,
+        budget: &SearchBudget<'_>,
+    ) -> (Result<Vec<Nearest>, Error>, crate::QueryDiagnostics) {
+        let mut ctx = Context::new(budget, false);
+        let result = self.nearest_work(point, options, &mut ctx);
+        (result, ctx.finish())
     }
     pub fn route(
         &self,
@@ -337,23 +431,105 @@ impl Engine {
         options: QueryOptions,
         budget: &SearchBudget<'_>,
     ) -> Result<RouteResult, Error> {
+        self.route_detailed(points, options, budget, RoutingAlgorithm::Auto)
+            .result
+    }
+    pub fn route_detailed(
+        &self,
+        points: &[Point],
+        options: QueryOptions,
+        budget: &SearchBudget<'_>,
+        algorithm: RoutingAlgorithm,
+    ) -> QueryOutcome {
+        let acceleration = if algorithm == RoutingAlgorithm::Dijkstra {
+            None
+        } else {
+            self.acceleration.as_ref()
+        };
+        let mut ctx = Context::new(budget, acceleration.is_some());
+        let result = self.route_inner(points, options, &mut ctx, acceleration);
+        QueryOutcome {
+            result,
+            diagnostics: ctx.finish(),
+        }
+    }
+    fn route_inner(
+        &self,
+        points: &[Point],
+        options: QueryOptions,
+        ctx: &mut Context<'_, '_>,
+        acceleration: Option<&Index>,
+    ) -> Result<RouteResult, Error> {
         if !(2..=10).contains(&points.len()) {
             return Err(Error::InvalidInput);
         }
-        if budget.max_states == 0 || budget.max_queue == 0 || budget.max_geometry == 0 {
-            return Err(Error::BudgetExceeded);
+        ctx.capacity(1, 1)?;
+        if ctx.budget.max_geometry == 0 {
+            return Err(ctx.fail("geometry", 1, 0));
         }
-        let mut work = 0;
         let mut matches = Vec::new();
         for &p in points {
-            let mut near = self.nearest_work(p, options, budget, &mut work)?;
+            let mut near = self.nearest_work(p, options, ctx)?;
             let best = near[0].distance_m;
             near.retain(|v| v.distance_m <= best + 0.01);
             matches.push(near);
         }
+        // Keep a nearby closed component when ALL waypoints can use it;
+        // otherwise seek a main-component alternative independently of top-k.
+        let common = matches[0]
+            .iter()
+            .map(|m| self.components.weak[m.from])
+            .any(|c| {
+                matches
+                    .iter()
+                    .all(|list| list.iter().any(|m| self.components.weak[m.from] == c))
+            });
+        if !common {
+            for (i, list) in matches.iter_mut().enumerate() {
+                let c = self.components.weak[list[0].from];
+                if c != self.components.largest && self.components.size[c as usize] < 1000 {
+                    match self.nearest_component(
+                        points[i],
+                        options,
+                        Some(self.components.largest),
+                        ctx,
+                    ) {
+                        Ok(mut alternatives) => {
+                            let best = alternatives[0].distance_m;
+                            alternatives.retain(|m| m.distance_m <= best + 0.01);
+                            *list = alternatives;
+                            ctx.diagnostics.snap_fallbacks += 1;
+                        }
+                        Err(Error::NoSegment) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+        for pair in matches.windows(2) {
+            if !pair[0].iter().any(|a| {
+                pair[1]
+                    .iter()
+                    .any(|b| self.components.weak[a.from] == self.components.weak[b.from])
+            }) {
+                return Err(Error::NoRoute);
+            }
+        }
+        let open = acceleration.map(|index| {
+            index.open_cells(
+                matches
+                    .iter()
+                    .flatten()
+                    .flat_map(|m| [m.from, m.to].into_iter()),
+            )
+        });
         let overlay = Overlay::new(&self.graph, &matches);
+        ctx.phase("search");
+        if let Some(index) = acceleration {
+            return self.search_accelerated(&matches, &overlay, index, open.as_ref().unwrap(), ctx);
+        }
         let mut distances: HashMap<State, u64> = HashMap::new();
-        let mut previous: HashMap<State, (State, Traversal)> = HashMap::new();
+        let mut previous: HashMap<State, (State, PathArc)> = HashMap::new();
         let mut queue = BinaryHeap::new();
         for m in &matches[0] {
             let vertex = overlay.vertex(&self.graph, m);
@@ -370,64 +546,76 @@ impl Engine {
                 stage: 1,
             };
             state.stage = overlay.advance(vertex, state.stage);
-            budget.tick(&mut work)?;
+            ctx.tick()?;
             if !distances.contains_key(&state) {
-                if distances.len() >= budget.max_states || queue.len() >= budget.max_queue {
-                    return Err(Error::BudgetExceeded);
-                }
+                ctx.capacity(distances.len() + 1, queue.len() + 1)?;
                 distances.insert(state, 0);
                 queue.push(Reverse((0, state)));
             }
         }
         while let Some(Reverse((cost, state))) = queue.pop() {
-            budget.tick(&mut work)?;
+            ctx.tick()?;
             if distances.get(&state) != Some(&cost) {
                 continue;
             }
             if state.stage == points.len() {
-                return self.recover(
-                    state, cost, &previous, &overlay, &matches, budget, &mut work,
-                );
+                ctx.phase("recover");
+                return self.recover(state, cost, &previous, &overlay, &matches, ctx);
             }
-            let arcs = overlay.arcs(&self.graph, &self.outgoing, state.vertex);
-            for arc in arcs {
-                budget.tick(&mut work)?;
-                let automaton = if arc.enter {
-                    let Some(next) = self.restrictions.step(state.automaton, arc.edge) else {
-                        continue;
-                    };
-                    next
-                } else {
-                    state.automaton
+            ctx.diagnostics.settled_states += 1;
+            let mut relax = |to: usize,
+                             duration: u64,
+                             path_arc: PathArc,
+                             automaton: Option<usize>|
+             -> Result<(), Error> {
+                ctx.tick()?;
+                match path_arc {
+                    PathArc::Base(_) => ctx.diagnostics.scanned_edges += 1,
+                    PathArc::Shortcut { .. } => ctx.diagnostics.relaxed_shortcuts += 1,
+                    PathArc::Chain { .. } => unreachable!("baseline uses original edges"),
+                }
+                let Some(automaton) = automaton else {
+                    return Ok(());
                 };
                 let next = State {
-                    vertex: arc.to,
+                    vertex: to,
                     automaton,
-                    stage: overlay.advance(arc.to, state.stage),
+                    stage: overlay.advance(to, state.stage),
                 };
-                let duration = scaled(self.graph.edges[arc.edge].duration_ms, arc.end - arc.start)?;
                 let next_cost = cost.checked_add(duration).ok_or(Error::CostOverflow)?;
                 if distances.get(&next).is_none_or(|&old| next_cost < old) {
-                    if (!distances.contains_key(&next) && distances.len() >= budget.max_states)
-                        || queue.len() >= budget.max_queue
-                    {
-                        return Err(Error::BudgetExceeded);
-                    }
+                    ctx.capacity(
+                        distances.len() + usize::from(!distances.contains_key(&next)),
+                        queue.len() + 1,
+                    )?;
                     distances.insert(next, next_cost);
-                    previous.insert(
-                        next,
-                        (
-                            state,
-                            Traversal {
-                                edge: arc.edge,
-                                start: arc.start,
-                                end: arc.end,
-                            },
-                        ),
-                    );
+                    previous.insert(next, (state, path_arc));
                     queue.push(Reverse((next_cost, next)));
                 }
-            }
+                Ok(())
+            };
+            overlay.visit_arcs(&self.graph, &self.outgoing, state.vertex, |arc| {
+                let automaton = if arc.enter {
+                    self.restrictions.step(state.automaton, arc.edge)
+                } else {
+                    Some(state.automaton)
+                };
+                let duration = if automaton.is_some() {
+                    scaled(self.graph.edges[arc.edge].duration_ms, arc.end - arc.start)?
+                } else {
+                    0
+                };
+                relax(
+                    arc.to,
+                    duration,
+                    PathArc::Base(Traversal {
+                        edge: arc.edge,
+                        start: arc.start,
+                        end: arc.end,
+                    }),
+                    automaton,
+                )
+            })?;
         }
         Err(Error::NoRoute)
     }
@@ -436,19 +624,79 @@ impl Engine {
         &self,
         mut cursor: State,
         cost: u64,
-        previous: &HashMap<State, (State, Traversal)>,
+        previous: &HashMap<State, (State, PathArc)>,
         overlay: &Overlay,
         matches: &[Vec<Nearest>],
-        budget: &SearchBudget<'_>,
-        work: &mut usize,
+        ctx: &mut Context<'_, '_>,
     ) -> Result<RouteResult, Error> {
         let mut traversals = Vec::new();
         while let Some((parent, arc)) = previous.get(&cursor) {
-            budget.tick(work)?;
-            if traversals.len().saturating_add(1) >= budget.max_geometry {
-                return Err(Error::BudgetExceeded);
+            ctx.tick()?;
+            match *arc {
+                PathArc::Base(arc) => traversals.push((arc, parent.stage, cursor.stage)),
+                PathArc::Chain { chain, start, end } => {
+                    for (i, &edge) in self
+                        .compression
+                        .range(chain, start, end)
+                        .iter()
+                        .rev()
+                        .enumerate()
+                    {
+                        ctx.tick()?;
+                        if traversals.len() + 1 >= ctx.budget.max_geometry {
+                            return Err(ctx.fail(
+                                "geometry",
+                                traversals.len() + 2,
+                                ctx.budget.max_geometry,
+                            ));
+                        }
+                        traversals.push((
+                            Traversal {
+                                edge,
+                                start: 0.,
+                                end: 1.,
+                            },
+                            parent.stage,
+                            if i == 0 { cursor.stage } else { parent.stage },
+                        ));
+                    }
+                }
+                PathArc::Shortcut {
+                    from,
+                    to,
+                    level,
+                    cost,
+                } => {
+                    let index = self.acceleration.as_ref().ok_or(Error::InvalidDataset)?;
+                    let edges = index.unpack(
+                        from,
+                        Link {
+                            to,
+                            cost,
+                            edge: 0,
+                            level: Some(level),
+                        },
+                        ctx,
+                        ctx.budget.max_geometry.saturating_sub(traversals.len() + 1),
+                    )?;
+                    // Parent-chain recovery runs backwards. Preserve the order
+                    // when the entire original-edge sequence is reversed below.
+                    for (i, edge) in edges.into_iter().rev().enumerate() {
+                        traversals.push((
+                            Traversal {
+                                edge,
+                                start: 0.,
+                                end: 1.,
+                            },
+                            parent.stage,
+                            if i == 0 { cursor.stage } else { parent.stage },
+                        ));
+                    }
+                }
             }
-            traversals.push((*arc, parent.stage, cursor.stage));
+            if traversals.len().saturating_add(1) > ctx.budget.max_geometry {
+                return Err(ctx.fail("geometry", traversals.len() + 1, ctx.budget.max_geometry));
+            }
             cursor = *parent;
         }
         traversals.reverse();
@@ -473,7 +721,7 @@ impl Engine {
             snapped.push(geometry[0]);
         }
         for (arc, before, after) in traversals {
-            budget.tick(work)?;
+            ctx.tick()?;
             let e = &self.graph.edges[arc.edge];
             let d = scaled(e.distance_mm, arc.end - arc.start)?;
             let t = scaled(e.duration_ms, arc.end - arc.start)?;
@@ -486,7 +734,7 @@ impl Engine {
             let b = geometry.len() - 1;
             // Account for the outgoing-edge inspections performed by guidance.
             for _ in &self.outgoing[e.from] {
-                budget.tick(work)?;
+                ctx.tick()?;
             }
             let maneuver = if let Some(prev) = prev_edge {
                 self.maneuver(prev, arc.edge, &mut roundabout_exit)
@@ -635,6 +883,14 @@ impl Engine {
     }
 }
 fn scaled(value: u64, fraction: f64) -> Result<u64, Error> {
+    // Preserve full-edge integer weights (including values above 2^53) so
+    // customized metrics and the baseline search use exactly the same costs.
+    if fraction == 1. {
+        return Ok(value);
+    }
+    if fraction == 0. {
+        return Ok(0);
+    }
     let v = (value as f64 * fraction).round();
     if !v.is_finite() || v < 0. || v >= u64::MAX as f64 {
         return Err(Error::CostOverflow);
@@ -652,6 +908,21 @@ struct State {
     vertex: usize,
     automaton: usize,
     stage: usize,
+}
+#[derive(Clone, Copy)]
+enum PathArc {
+    Base(Traversal),
+    Chain {
+        chain: u32,
+        start: usize,
+        end: usize,
+    },
+    Shortcut {
+        from: usize,
+        to: usize,
+        level: usize,
+        cost: u64,
+    },
 }
 #[derive(Clone, Copy)]
 struct Traversal {
@@ -747,23 +1018,60 @@ impl Overlay {
             interpolate(g.nodes[e.from], g.nodes[e.to], s.fraction)
         }
     }
-    fn arcs(&self, g: &Graph, outgoing: &Adjacency, vertex: usize) -> Vec<Arc> {
+    fn visit_incoming(
+        &self,
+        g: &Graph,
+        incoming: &crate::topology::Rows,
+        vertex: usize,
+        mut visit: impl FnMut(Arc) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut emit = |edge: usize, end: f64| {
+            let prev = self.by_edge.get(&edge).and_then(|ids| {
+                ids.iter()
+                    .rev()
+                    .copied()
+                    .find(|&v| self.splits[v - self.base].fraction < end - 1e-12)
+            });
+            visit(Arc {
+                to: prev.unwrap_or(g.edges[edge].from),
+                edge,
+                start: prev
+                    .map(|v| self.splits[v - self.base].fraction)
+                    .unwrap_or(0.),
+                end,
+                enter: prev.is_none(),
+            })
+        };
         if vertex < self.base {
-            outgoing[vertex]
-                .iter()
-                .map(|&edge| {
-                    let first = self.by_edge.get(&edge).and_then(|v| v.first()).copied();
-                    Arc {
-                        to: first.unwrap_or(g.edges[edge].to),
-                        edge,
-                        start: 0.,
-                        end: first
-                            .map(|v| self.splits[v - self.base].fraction)
-                            .unwrap_or(1.),
-                        enter: true,
-                    }
-                })
-                .collect()
+            for &edge in &incoming[vertex] {
+                emit(edge, 1.)?;
+            }
+        } else {
+            let split = &self.splits[vertex - self.base];
+            emit(split.edge, split.fraction)?;
+        }
+        Ok(())
+    }
+    fn visit_arcs(
+        &self,
+        g: &Graph,
+        outgoing: &Adjacency,
+        vertex: usize,
+        mut visit: impl FnMut(Arc) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        if vertex < self.base {
+            for &edge in &outgoing[vertex] {
+                let first = self.by_edge.get(&edge).and_then(|v| v.first()).copied();
+                visit(Arc {
+                    to: first.unwrap_or(g.edges[edge].to),
+                    edge,
+                    start: 0.,
+                    end: first
+                        .map(|v| self.splits[v - self.base].fraction)
+                        .unwrap_or(1.),
+                    enter: true,
+                })?;
+            }
         } else {
             let s = &self.splits[vertex - self.base];
             let ids = &self.by_edge[&s.edge];
@@ -772,7 +1080,7 @@ impl Overlay {
                 .position(|&id| id == vertex)
                 .and_then(|i| ids.get(i + 1))
                 .copied();
-            vec![Arc {
+            visit(Arc {
                 to: next.unwrap_or(g.edges[s.edge].to),
                 edge: s.edge,
                 start: s.fraction,
@@ -780,7 +1088,8 @@ impl Overlay {
                     .map(|v| self.splits[v - self.base].fraction)
                     .unwrap_or(1.),
                 enter: false,
-            }]
+            })?;
         }
+        Ok(())
     }
 }

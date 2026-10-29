@@ -1,4 +1,4 @@
-//! City-scale immutable dataset routing and a separate synthetic NodeEngine.
+//! Immutable city/regional dataset routing and a separate synthetic NodeEngine.
 //! The production Engine supports coordinate snapping, continuous waypoints,
 //! restriction history, bounded work and cooperative cancellation.
 //!
@@ -15,7 +15,10 @@
 //! # Ok(())
 //! # }
 //! ```
+pub mod acceleration;
+mod diagnostics;
 pub mod geometry;
+pub use diagnostics::{BudgetFailure, QueryDiagnostics, QueryOutcome, RoutingAlgorithm};
 
 use routeweft_domain::model::{Coordinate, TravelProfile};
 use std::cmp::Reverse;
@@ -226,4 +229,5 @@ impl NodeEngine {
 }
 
 mod roads;
-pub use roads::{Engine, Leg, Nearest, QueryOptions, RouteResult, Step};
+mod topology;
+pub use roads::{Engine, Leg, LoadDiagnostics, Nearest, QueryOptions, RouteResult, Step};
