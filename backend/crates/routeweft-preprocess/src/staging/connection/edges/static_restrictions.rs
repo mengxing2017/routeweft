@@ -1,5 +1,7 @@
 //! Resolve static restrictions through bounded disk graph access. Reject policy only.
-use super::super::{key, ConnectionReport, Cursor, DiskRun, Row, Source, Workspace, Writer, WIDTH};
+use super::super::{
+    key, ConnectionReport, Cursor, DiskRun, Row, Sorter, Source, Workspace, Writer, WIDTH,
+};
 use super::{
     descriptor, manifest, regular, AccessBudget, AdjacencyReport, DiskEdgeAccess, EdgeReport,
     WayEdgeIndex,
@@ -335,11 +337,61 @@ pub(crate) fn resolve_with_audit(
         published: false,
         scope: "external_restrictions",
     };
+    let closure_start = std::time::Instant::now();
+    // Build closure only for ways used by applicable static restrictions. Sort
+    // their node references and merge with source nodes (Valhalla-style join),
+    // rather than making a binary disk lookup for every source-way node.
+    let mut member_ways = BTreeSet::new();
+    let mut member_nodes = BTreeSet::new();
+    source.visit_kinds(&[2], |record| {
+        if let Record::Relation(rel) = record {
+            if restrictions::applies(&rel) && !restrictions::conditional(&rel) {
+                for member in rel.members {
+                    let set = match member.kind {
+                        0 => &mut member_nodes,
+                        1 => &mut member_ways,
+                        _ => continue,
+                    };
+                    set.insert(member.id);
+                    // Reserve for candidate, present and missing sets as well.
+                    if (member_ways.len() + member_nodes.len()) > 131_072 {
+                        return Err(resource_limit(
+                            "restriction_closure_members",
+                            131_072,
+                            (member_ways.len() + member_nodes.len()) as u64,
+                            "external_restrictions",
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    let mut references = Sorter::default();
+    let mut present_ways = BTreeSet::new();
+    let mut reference_count = 0u64;
+    source.visit_kinds(&[1], |record| {
+        if let Record::Way(way) = record {
+            if member_ways.contains(&way.id) {
+                present_ways.insert(way.id);
+                for (ordinal, id) in way.refs.iter().enumerate() {
+                    references.push([key(*id), key(way.id), ordinal as u64, 0, 0, 0], &mut work)?;
+                    reference_count += 1;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    let references = references.finish(&mut work)?;
+    let mut refs = Cursor::open(&references)?;
+    let mut reference = refs.next()?;
+    let mut missing_ways = BTreeSet::new();
     let mut raw_nodes = Writer::new(&mut work)?;
     let mut joined = Cursor::open(&node_run)?;
     let mut node = joined.next()?;
     let mut checked = 0;
-    source.visit(|record| {
+    source.visit_kinds(&[0], |record| {
         if let Record::Node {
             id,
             lon_bits,
@@ -347,7 +399,15 @@ pub(crate) fn resolve_with_audit(
             tags,
         } = record
         {
-            raw_nodes.push([key(id), 0, 0, 0, 0, 0], &mut work)?;
+            if member_nodes.contains(&id) {
+                raw_nodes.push([key(id), 0, 0, 0, 0, 0], &mut work)?;
+            }
+            while let Some(row) = reference.filter(|r| r[0] <= key(id)) {
+                if row[0] < key(id) {
+                    missing_ways.insert(row[1]);
+                }
+                reference = refs.next()?;
+            }
             if let Some(row) = node {
                 if row[0] < key(id) {
                     return Err(invalid("restriction retained node missing").into());
@@ -372,58 +432,52 @@ pub(crate) fn resolve_with_audit(
         }
         Ok(())
     })?;
+    while let Some(row) = reference {
+        missing_ways.insert(row[1]);
+        reference = refs.next()?;
+    }
+    drop(refs);
+    work.remove(references)?;
     if node.is_some() || checked != connection.nodes {
         return Err(invalid("restriction node coverage").into());
     }
     let raw_nodes = raw_nodes.finish()?;
-    let mut node_table = Table::open(&raw_nodes)?;
     let mut raw_ways = Writer::new(&mut work)?;
-    let closure_start = std::time::Instant::now();
-    let mut closure_ways = 0u64;
-    let mut build_budget = AccessBudget::new(u64::MAX);
-    source.visit(|record| {
-        if let Record::Way(way) = record {
-            closure_ways += 1;
-            if closure_ways % 100_000 == 0 {
-                options.stage.observe(crate::staging::BuildProgress {
-                    stage: "way_closure",
-                    attempt: audit.summary.attempt as u64,
-                    completed: closure_ways,
-                    diagnostics_observed: audit.summary.records_observed,
-                    scratch_peak_bytes: work.peak,
-                    scratch_scope: "restrictions",
-                    ..Default::default()
-                });
-            }
-            let mut closed = true;
-            for id in &way.refs {
-                if node_table.find(*id, &mut build_budget)?.is_none() {
-                    closed = false;
-                    break;
-                }
-            }
-            raw_ways.push(
-                [key(way.id), if closed { 2 } else { 1 }, 0, 0, 0, 0],
-                &mut work,
-            )?;
-        }
-        Ok(())
-    })?;
+    for id in &present_ways {
+        raw_ways.push(
+            [
+                key(*id),
+                if missing_ways.contains(&key(*id)) {
+                    1
+                } else {
+                    2
+                },
+                0,
+                0,
+                0,
+                0,
+            ],
+            &mut work,
+        )?;
+    }
     let raw_ways = raw_ways.finish()?;
     let closure_metrics = [
         (
             "build_way_closure_elapsed_ms",
             closure_start.elapsed().as_millis() as u64,
         ),
-        ("build_way_closure_node_lookups", node_table.lookups),
-        ("build_way_closure_row_probes", node_table.probes),
-        ("build_way_closure_disk_reads", node_table.reads),
-        ("build_way_closure_disk_bytes", node_table.read_bytes),
+        ("build_way_closure_member_ways", present_ways.len() as u64),
+        ("build_way_closure_merge_references", reference_count),
+        ("build_way_closure_missing_ways", missing_ways.len() as u64),
+        ("build_way_closure_node_lookups", 0),
+        ("build_way_closure_row_probes", 0),
+        ("build_way_closure_disk_reads", 0),
+        ("build_way_closure_disk_bytes", 0),
     ];
     let mut access = DiskAccess {
         graph,
         ways,
-        raw_nodes: node_table,
+        raw_nodes: Table::open(&raw_nodes)?,
         raw_ways: Table::open(&raw_ways)?,
         nodes: Table::open(&node_run)?,
         budget: AccessBudget::new(0),
@@ -442,7 +496,7 @@ pub(crate) fn resolve_with_audit(
         .collect();
     let start = audit.records.len();
     source
-        .visit(|record| {
+        .visit_kinds(&[2], |record| {
             let Record::Relation(rel) = record else {
                 return Ok(());
             };
