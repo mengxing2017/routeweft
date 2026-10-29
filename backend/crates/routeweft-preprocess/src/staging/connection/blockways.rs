@@ -315,7 +315,7 @@ pub fn prepare_block_ways(
     prepare_with_policy(staged, output, options, InvalidRestrictionPolicy::BlockWays)
 }
 
-pub(crate) fn prepare_with_policy(
+pub fn prepare_with_policy(
     staged: &Path,
     output: &Path,
     options: BlockWaysOptions,

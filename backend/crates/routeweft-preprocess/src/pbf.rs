@@ -6,25 +6,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 pub type Tags = BTreeMap<String, String>;
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub id: i64,
     pub point: Point,
     pub tags: Tags,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Way {
     pub id: i64,
     pub refs: Vec<i64>,
     pub tags: Tags,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Member {
     pub id: i64,
     pub kind: u64,
     pub role: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Relation {
     pub id: i64,
     pub members: Vec<Member>,

@@ -230,7 +230,6 @@ fn blocked_node(tags: &Tags) -> bool {
                 "no" | "entrance" | "cattle_grid" | "toll_booth" | "border_control"
             ))
 }
-#[cfg(test)]
 fn graph_attempt(
     osm: &Osm,
     excluded: &BTreeSet<i64>,

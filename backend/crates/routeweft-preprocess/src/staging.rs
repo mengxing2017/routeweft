@@ -7,10 +7,11 @@ pub use build::{
     ExternalBuildResult,
 };
 pub use connection::{
-    connect, emit_edges, index_adjacency, prepare_block_ways, publish_block_ways,
-    resolve_restrictions, AccessBudget, AdjacencyReport, BlockWaysOptions, BlockWaysReport,
-    ConnectionReport, DiskEdgeAccess, EdgeReport, PublicationReport, RestrictionOptions,
-    RestrictionReport, WayEdgeIndex, WayEdgeLocation,
+    audit_staged_restrictions, connect, emit_edges, index_adjacency, prepare_block_ways,
+    prepare_with_policy, publish_block_ways, resolve_restrictions, AccessBudget, AdjacencyReport,
+    BlockWaysOptions, BlockWaysReport, ConnectionReport, DiskEdgeAccess, EdgeReport,
+    InventorySummary, PublicationReport, RestrictionOptions, RestrictionReport, WayEdgeIndex,
+    WayEdgeLocation,
 };
 
 use crate::pbf::{self, Node, RecordSink, Relation, Way};
