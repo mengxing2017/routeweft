@@ -267,6 +267,47 @@ mod tests {
     use crate::pbf::{Member, Tags, Way};
     use crate::staging::connection::tests::{fixture, source, temporary};
     #[test]
+    fn inventory_distinguishes_profile_selection_from_effective_edges() {
+        let parent = temporary();
+        let mut osm = fixture();
+        osm.relations.clear();
+        osm.ways.clear();
+        osm.ways.insert(
+            10,
+            Way {
+                id: 10,
+                refs: vec![-3, 2],
+                tags: Tags::from([("highway".into(), "residential".into())]),
+            },
+        );
+        osm.relations.push(Relation {
+            id: 2,
+            tags: Tags::from([
+                ("type".into(), "restriction".into()),
+                ("restriction".into(), "no_right_turn".into()),
+            ]),
+            members: vec![Member {
+                id: 10,
+                kind: 1,
+                role: "from".into(),
+            }],
+        });
+        let staged = source(&parent, &osm);
+        let output = parent.join("inventory.jsonl");
+        let summary =
+            audit_staged_restrictions(&staged, &output, &parent.join("fixtures"), 8 * 1024 * 1024)
+                .unwrap();
+        assert_eq!(summary.classifications["no_retained_member_way"], 1);
+        let row: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+        assert_eq!(row["way_states"][0]["profile_selected"], true);
+        assert!(row["issues"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("NoEffectiveDirectedEdges")));
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
     fn inventory_separates_missing_filtered_and_multiple_shape_issues() {
         let parent = temporary();
         let mut osm = fixture();
