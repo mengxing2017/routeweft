@@ -82,3 +82,9 @@ python3 scripts/validate-city.py --binary backend/target/release/routeweft \
 ## 嵌入 Rust 应用
 
 公开入口是 `routeweft_routing::Engine::open/nearest/route`，见 [API 与示例](api.md)。常驻宿主应复用已加载的 Engine，而不是每次查询重新启动 CLI 和加载图。CLI 适合构建、检查、脚本调用与初步接入；进程宿主负责超时、并发和生命周期。
+
+## 省级转向审计错误处理
+
+出现 BudgetExceeded 时先查看 error.resource 和 error.details.restriction_audit。`restriction_audit_records` 表示累计审计已达条数预算，observed 可能只是下界；与路径搜索预算、maxspeed 回退、输入对象上限不同。`blockways_attempts` 表示级联构图轮次耗尽。失败报告保留已收集关系，不能因部分列表存在而继续发布。
+
+默认允许 4096 条审计记录、16 MiB 序列化计费及 64 轮 BlockWays；可在固定硬边界内显式设置，见 [CLI 审计预算](cli.md#转向限制审计预算)。广东样本第一轮 728 条错误不意味着后续轮次也不超限；修改任何限制不替代路网 verify、连通性和路线质量检查。构建失败不激活新数据集，保留上一份已验证产物。工作目录日期不是 PBF 快照，复核输入 SHA-256 与 source_snapshot 后再比较结果。
