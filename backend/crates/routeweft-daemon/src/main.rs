@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -125,6 +125,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--max-scratch-bytes",
             "--max-scratch-files",
             "--build-timeout-ms",
+            "--progress",
             "--max-restriction-diagnostics",
             "--max-restriction-audit-bytes",
             "--max-blockways-attempts",
@@ -350,6 +351,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--max-scratch-bytes",
             "--max-scratch-files",
             "--build-timeout-ms",
+            "--progress",
         ];
         if builder == "memory" && external_flags.iter().any(|key| flags.contains_key(key)) {
             return Err(bad("external build options require --builder external"));
@@ -383,6 +385,28 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 build: options,
                 ..Default::default()
             };
+            match flags.get("--progress").copied().unwrap_or("off") {
+                "off" => {}
+                "json" => {
+                    external.stage.progress = Some(|event| {
+                        use std::io::Write;
+                        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+                        let elapsed_ms =
+                            START.get_or_init(Instant::now).elapsed().as_millis() as u64;
+                        let mut stderr = std::io::stderr().lock();
+                        let _ = writeln!(
+                            stderr,
+                            "{}",
+                            json!({"schema":1, "event":"build_progress",
+                        "stage":event.stage, "attempt":event.attempt, "completed":event.completed,
+                                "diagnostics_observed":event.diagnostics_observed,
+                                "scratch_peak_bytes":event.scratch_peak_bytes, "scratch_scope":event.scratch_scope,
+                                "cancellation_checkpoint":event.cancellation_checkpoint, "elapsed_ms":elapsed_ms})
+                        );
+                    })
+                }
+                _ => return Err(bad("invalid progress; use off or json")),
+            }
             external.stage.graph_capacity = graph_capacity;
             external.writer.graph_capacity = graph_capacity;
             external.writer.output_bytes = graph_capacity.limits().max_bytes + 1024 * 1024;
