@@ -30,16 +30,23 @@ backend-dev:
 web-dev:
 	pnpm --dir frontend dev
 
-.PHONY: release-check release-dry-run release-publish release-test
+REGISTRIES ?=
+PUBLISH_INTERVAL ?= 60
+MAX_RATE_LIMIT_RETRIES ?= 3
+RELEASE_PUBLISH_ARGS = --publish-interval $(PUBLISH_INTERVAL) --max-rate-limit-retries $(MAX_RATE_LIMIT_RETRIES)
+RELEASE_REGISTRY_ARGS = $(foreach registry,$(REGISTRIES),--registry $(registry))
 
-release-check:
-	python3 scripts/private-release.py check
-
-release-dry-run:
-	python3 scripts/private-release.py release
-
-release-publish:
-	python3 scripts/private-release.py release --execute
+.PHONY: release-check release-dry-run release-publish release-test release-target-check
+release-target-check:
+	@test -n "$(strip $(REGISTRIES))" || { echo '请指定目标仓库：REGISTRIES=crates-io（公共）或 REGISTRIES=internal（私有）' >&2; exit 2; }
+release-check: release-target-check
+	@set -e; for registry in $(REGISTRIES); do python3 scripts/release.py check --registry "$$registry"; done
+release-dry-run: release-target-check
+	python3 scripts/release.py release $(RELEASE_REGISTRY_ARGS) $(RELEASE_PUBLISH_ARGS)
+release-publish: release-target-check
+	python3 scripts/release.py release $(RELEASE_REGISTRY_ARGS) $(RELEASE_PUBLISH_ARGS) --execute
+release-test:
+	python3 -m unittest discover -s scripts/tests -v
 
 .PHONY: release-frontend-dry-run release-frontend-publish
 
@@ -48,6 +55,3 @@ release-frontend-dry-run:
 
 release-frontend-publish:
 	python3 scripts/frontend-release.py --execute
-
-release-test:
-	python3 -m unittest discover -s scripts/tests -v
