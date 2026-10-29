@@ -1,11 +1,13 @@
 use routeweft_dataset::{GraphCapacity, Point};
-use routeweft_routing::{Engine, QueryOptions, SearchBudget};
+use routeweft_routing::acceleration::{self, CustomizationOptions};
+use routeweft_routing::{Engine, QueryDiagnostics, QueryOptions, RoutingAlgorithm, SearchBudget};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways] [--json]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways (default reject); --invalid-maxspeed reject|use_default (default reject)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -13,6 +15,7 @@ struct Failure {
     code: u8,
     details: Option<Box<routeweft_preprocess::InputReport>>,
     resource: Option<Box<routeweft_dataset::ResourceLimit>>,
+    diagnostics: Option<Box<QueryDiagnostics>>,
 }
 fn bad(message: impl Into<String>) -> Failure {
     Failure {
@@ -21,6 +24,7 @@ fn bad(message: impl Into<String>) -> Failure {
         code: 2,
         details: None,
         resource: None,
+        diagnostics: None,
     }
 }
 fn data_error(error: routeweft_dataset::Error) -> Failure {
@@ -42,6 +46,7 @@ fn data_error(error: routeweft_dataset::Error) -> Failure {
         code: 4,
         details: None,
         resource,
+        diagnostics: None,
     }
 }
 fn build_error(error: routeweft_preprocess::Error) -> Failure {
@@ -69,6 +74,7 @@ fn query_error(error: routeweft_routing::Error) -> Failure {
         message: error.to_string(),
         details: None,
         resource: None,
+        diagnostics: None,
         code: match error {
             routeweft_routing::Error::InvalidInput
             | routeweft_routing::Error::UnsupportedProfile => 2,
@@ -93,7 +99,15 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     let command = &args[0];
     if !matches!(
         command.as_str(),
-        "build" | "preflight" | "version" | "inspect" | "verify" | "nearest" | "route"
+        "build"
+            | "preflight"
+            | "version"
+            | "inspect"
+            | "verify"
+            | "nearest"
+            | "route"
+            | "customize"
+            | "serve"
     ) {
         return Err(bad("unknown command"));
     }
@@ -121,7 +135,25 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         ],
         "version" => &[],
         "inspect" => &["--dataset", "--mode", "--graph-capacity"],
+        "customize" => &[
+            "--dataset",
+            "--graph-capacity",
+            "--max-load-bytes",
+            "--max-work",
+            "--timeout-ms",
+        ],
+        "serve" => &[
+            "--dataset",
+            "--graph-capacity",
+            "--max-load-bytes",
+            "--algorithm",
+            "--max-work",
+            "--max-states",
+            "--max-queue",
+            "--timeout-ms",
+        ],
         "route" => &[
+            "--algorithm",
             "--dataset",
             "--coordinates",
             "--graph-capacity",
@@ -181,7 +213,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
             "build":serde_json::from_str::<Value>(include_str!(concat!(env!("OUT_DIR"), "/build-identity.json"))).expect("build identity"),
             "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
-            "commands":["build","preflight","inspect","verify","nearest","route","version"],
+            "commands":["build","preflight","inspect","verify","nearest","route","customize","serve","version"],
             "invalid_restriction_policies":["reject","block_ways"],
             "invalid_maxspeed_policies":["reject","use_default"],
             "capabilities": {
@@ -189,6 +221,8 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 "external_build_formats":[2], "external_memory_build":false,
                 "graph_capacity_profiles": {"city":{"nodes":1000000,"edges":2000000,"bytes":268435456,"span_degrees":5},
                     "regional":{"nodes":8000000,"edges":16000000,"bytes":2147483648_u64,"span_degrees":10,"builder":"external","format":2}},
+                "routing_acceleration":{"algorithm":"mld","file":"routing.mld","version":1,"optional":true,"restriction_edges":"explicit"},
+                "resident_jsonl":true,
                 "v2_verify":"streaming", "runtime_memory_budget_kind":"estimated_allocations_not_rss",
                 "large_pbf_3gib":false, "dataset_access":"in_memory",
                 "preflight":"full_semantic_build", "preflight_cache":false,
@@ -227,6 +261,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 code: 2,
                 details: None,
                 resource: None,
+                diagnostics: None,
             });
         }
         let options = routeweft_preprocess::BuildOptions {
@@ -381,15 +416,40 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         };
         return Ok(json!({"schema":1,"status":"ok","verified":true,"manifest":m}));
     }
-    let metadata = routeweft_dataset::inspect_manifest(dataset, load_limits).map_err(data_error)?;
-    routeweft_dataset::check_resident_budget(&metadata, load_limits, true).map_err(data_error)?;
-    let engine =
-        Engine::open_with_capacity(dataset, load_limits, graph_capacity).map_err(query_error)?;
     let number = |key: &str, default: u64| -> Result<u64, Failure> {
         flags
             .get(key)
             .map(|v| v.parse().map_err(|_| bad(format!("invalid {key}"))))
             .unwrap_or(Ok(default))
+    };
+    if command == "customize" {
+        let timeout = number("--timeout-ms", 1_800_000)?;
+        let options = CustomizationOptions {
+            max_work: usize::try_from(number("--max-work", 2_000_000_000)?)
+                .map_err(|_| bad("work limit"))?,
+            deadline: Some(
+                Instant::now()
+                    .checked_add(Duration::from_millis(timeout))
+                    .ok_or_else(|| bad("timeout"))?,
+            ),
+            ..Default::default()
+        };
+        let start = Instant::now();
+        let info = acceleration::customize(dataset, load_limits, options).map_err(query_error)?;
+        return Ok(
+            json!({"schema":1,"status":"ok","acceleration":info,"elapsed_ms":start.elapsed().as_secs_f64()*1000.}),
+        );
+    }
+    let load = Instant::now();
+    let metadata = routeweft_dataset::inspect_manifest(dataset, load_limits).map_err(data_error)?;
+    routeweft_dataset::check_resident_budget(&metadata, load_limits, true).map_err(data_error)?;
+    let engine =
+        Engine::open_with_capacity(dataset, load_limits, graph_capacity).map_err(query_error)?;
+    let load_ms = load.elapsed().as_secs_f64() * 1000.;
+    let algorithm = match flags.get("--algorithm").copied().unwrap_or("auto") {
+        "auto" => RoutingAlgorithm::Auto,
+        "dijkstra" => RoutingAlgorithm::Dijkstra,
+        _ => return Err(bad("algorithm must be auto or dijkstra")),
     };
     let budget = SearchBudget {
         max_work: usize::try_from(number("--max-work", 2_000_000)?)
@@ -398,12 +458,21 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             .map_err(|_| bad("state limit"))?,
         max_queue: usize::try_from(number("--max-queue", 500_000)?)
             .map_err(|_| bad("queue limit"))?,
+        deadline: None,
+        ..Default::default()
+    };
+    let timeout = number("--timeout-ms", 10_000)?;
+    if command == "serve" {
+        serve(&engine, load_ms, budget, timeout, algorithm)?;
+        return Ok(Value::Null);
+    }
+    let budget = SearchBudget {
         deadline: Some(
             Instant::now()
-                .checked_add(Duration::from_millis(number("--timeout-ms", 10_000)?))
+                .checked_add(Duration::from_millis(timeout))
                 .ok_or_else(|| bad("timeout"))?,
         ),
-        ..Default::default()
+        ..budget
     };
     let options = QueryOptions {
         radius_m: flags
@@ -412,24 +481,198 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             .unwrap_or(Ok(1000.))?,
         ..Default::default()
     };
-    if command == "nearest" {
-        let found = engine
-            .nearest(point(required("--coordinate")?)?, options, &budget)
-            .map_err(query_error)?;
-        Ok(
-            json!({"schema":1,"status":"ok","dataset_id":engine.manifest().dataset_id,"profile":engine.manifest().profile,"format":engine.manifest().format,"matches":found}),
+    let (result, diagnostics) = if command == "nearest" {
+        let (result, diagnostics) =
+            engine.nearest_detailed(point(required("--coordinate")?)?, options, &budget);
+        (
+            result.map(|found| {
+                json!({"schema":1,"status":"ok","dataset_id":engine.manifest().dataset_id,
+            "profile":engine.manifest().profile,"format":engine.manifest().format,"matches":found})
+            }),
+            diagnostics,
         )
     } else {
         let points = required("--coordinates")?
             .split(';')
             .map(point)
             .collect::<Result<Vec<_>, _>>()?;
-        let route = engine
-            .route(&points, options, &budget)
-            .map_err(query_error)?;
-        Ok(json!({"schema":1,"status":"ok","route":route}))
+        let outcome = engine.route_detailed(&points, options, &budget, algorithm);
+        (
+            outcome
+                .result
+                .map(|route| json!({"schema":1,"status":"ok","route":route})),
+            outcome.diagnostics,
+        )
+    };
+    match result {
+        Ok(mut value) => {
+            value["diagnostics"] = json!(diagnostics);
+            value["load_ms"] = json!(load_ms);
+            value["load_diagnostics"] = json!(engine.load_diagnostics());
+            value["acceleration"] = json!(engine.acceleration_info());
+            Ok(value)
+        }
+        Err(error) => {
+            let mut failure = query_error(error);
+            failure.diagnostics = Some(Box::new(diagnostics));
+            Err(failure)
+        }
     }
 }
+
+/// One immutable engine per process. Requests are serial and bounded; callers can
+/// use a process pool instead of spawning a process (and reloading) per request.
+fn serve(
+    engine: &Engine,
+    load_ms: f64,
+    defaults: SearchBudget<'_>,
+    timeout_ms: u64,
+    algorithm: RoutingAlgorithm,
+) -> Result<(), Failure> {
+    use std::io::{BufRead, Write};
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut output = std::io::stdout().lock();
+    writeln!(output, "{}", json!({"schema":1,"status":"ready","dataset_id":engine.manifest().dataset_id,
+        "load_ms":load_ms,"load_diagnostics":engine.load_diagnostics(),"acceleration":engine.acceleration_info()})).map_err(|_| query_error(routeweft_routing::Error::Io))?;
+    output
+        .flush()
+        .map_err(|_| query_error(routeweft_routing::Error::Io))?;
+    loop {
+        // Bound each request before JSON decoding, including a missing newline.
+        let mut bytes = Vec::new();
+        let count = (&mut input)
+            .take(65_537)
+            .read_until(b'\n', &mut bytes)
+            .map_err(|_| query_error(routeweft_routing::Error::Io))?;
+        if count == 0 {
+            break;
+        }
+        if count > 65_536 {
+            return Err(bad("JSONL request exceeds 65536 bytes"));
+        }
+        let request = serde_json::from_slice::<Value>(&bytes);
+        let id = request
+            .as_ref()
+            .ok()
+            .and_then(|r| r.get("id"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let mut response = (|| -> Result<Value, Failure> {
+            let request = request.map_err(|_| bad("invalid JSON request"))?;
+            if !request.is_object() || request.get("limits").is_some_and(|v| !v.is_object()) {
+                return Err(bad("request and limits must be JSON objects"));
+            }
+            let number = |key: &str, default: u64| -> Result<u64, Failure> {
+                request
+                    .get("limits")
+                    .and_then(|l| l.get(key))
+                    .map(|v| v.as_u64().ok_or_else(|| bad(format!("invalid {key}"))))
+                    .unwrap_or(Ok(default))
+            };
+            let budget = SearchBudget {
+                max_work: usize::try_from(
+                    number("max_work", defaults.max_work as u64)?.min(defaults.max_work as u64),
+                )
+                .map_err(|_| bad("work limit"))?,
+                max_states: usize::try_from(
+                    number("max_states", defaults.max_states as u64)?
+                        .min(defaults.max_states as u64),
+                )
+                .map_err(|_| bad("state limit"))?,
+                max_queue: usize::try_from(
+                    number("max_queue", defaults.max_queue as u64)?.min(defaults.max_queue as u64),
+                )
+                .map_err(|_| bad("queue limit"))?,
+                deadline: Some(
+                    Instant::now()
+                        .checked_add(Duration::from_millis(
+                            number("timeout_ms", timeout_ms)?.min(timeout_ms),
+                        ))
+                        .ok_or_else(|| bad("timeout"))?,
+                ),
+                ..Default::default()
+            };
+            let points: Vec<Point> = serde_json::from_value(
+                request
+                    .get("coordinates")
+                    .cloned()
+                    .ok_or_else(|| bad("missing coordinates"))?,
+            )
+            .map_err(|_| bad("coordinates must be [{lon,lat}, ...]"))?;
+            let radius_m = request
+                .get("radius_m")
+                .map(|v| v.as_f64().ok_or_else(|| bad("invalid radius_m")))
+                .unwrap_or(Ok(1000.))?;
+            let options = QueryOptions {
+                radius_m,
+                ..Default::default()
+            };
+            let (result, diagnostics) = match request
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or("route")
+            {
+                "route" => {
+                    let outcome = engine.route_detailed(&points, options, &budget, algorithm);
+                    (
+                        outcome.result.map(|route| json!({"route":route})),
+                        outcome.diagnostics,
+                    )
+                }
+                "nearest" if points.len() == 1 => {
+                    let (result, diagnostics) =
+                        engine.nearest_detailed(points[0], options, &budget);
+                    (
+                        result.map(|matches| json!({"matches":matches})),
+                        diagnostics,
+                    )
+                }
+                _ => {
+                    return Err(bad(
+                        "operation must be route, or nearest with one coordinate",
+                    ))
+                }
+            };
+            let mut response = match result {
+                Ok(value) => value,
+                Err(error) => {
+                    json!({"error":{"kind":format!("{error:?}"),"message":error.to_string()}})
+                }
+            };
+            response["schema"] = json!(1);
+            response["status"] = json!(if response.get("error").is_some() {
+                "error"
+            } else {
+                "ok"
+            });
+            response["diagnostics"] = json!(diagnostics);
+            Ok(response)
+        })()
+        .unwrap_or_else(failure_json);
+        response["id"] = id;
+        writeln!(output, "{response}").map_err(|_| query_error(routeweft_routing::Error::Io))?;
+        output
+            .flush()
+            .map_err(|_| query_error(routeweft_routing::Error::Io))?;
+    }
+    Ok(())
+}
+fn failure_json(e: Failure) -> Value {
+    let mut value =
+        json!({"schema":1,"status":"error","error":{"kind":e.kind,"message":e.message}});
+    if let Some(resource) = e.resource {
+        value["error"]["resource"] = json!(resource);
+    }
+    if let Some(report) = e.details {
+        value["error"]["details"] = json!(report);
+    }
+    if let Some(diagnostics) = e.diagnostics {
+        value["diagnostics"] = json!(diagnostics);
+    }
+    value
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--version"] || args == ["-V"] {
@@ -453,20 +696,15 @@ fn main() -> ExitCode {
     }
     match execute(args) {
         Ok(value) => {
-            println!("{value}");
+            if !value.is_null() {
+                println!("{value}");
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            let mut value =
-                json!({"schema":1,"status":"error","error":{"kind":e.kind,"message":e.message}});
-            if let Some(resource) = e.resource {
-                value["error"]["resource"] = json!(resource);
-            }
-            if let Some(report) = e.details {
-                value["error"]["details"] = json!(report);
-            }
-            println!("{value}");
-            ExitCode::from(e.code)
+            let code = e.code;
+            println!("{}", failure_json(e));
+            ExitCode::from(code)
         }
     }
 }
