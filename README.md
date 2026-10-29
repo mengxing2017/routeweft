@@ -66,6 +66,6 @@ cargo doc --manifest-path backend/Cargo.toml --workspace --no-deps --locked
 - [Cargo 公共与私有仓库发布](docs/release.md)
 - [私有发布迁移与前端 npm 发布](docs/private-release.md)
 
-CH/MLD、全国性能、跨数据集拼接、实时交通、骑行步行、完整车道引导和移动定位播报不在支持范围。数据集检查不提供来源签名或身份认证。
+长距离查询支持可选的[多级单元捷径加速与常驻查询](docs/routing-acceleration.md)：基础图构建后运行 `routeweft customize --dataset DIR`，旧 v1/v2 基础数据集也可升级。当前加速包含递归平衡图割、限制状态图双向查询、clique 剪枝、度二链查询压缩及小分量替代吸附；旧 RWFTML01 加速文件须重新定制为 RWFTML02。CH、完整 OSRM MLD/二进制兼容、全国性能、跨数据集拼接、实时交通、骑行步行、完整车道引导和移动定位播报不在支持范围。数据集检查不提供来源签名或身份认证。
 
 源码已托管到上述 GitHub 仓库，所有 crate 保持 `publish=false`；本文提供源码构建方式。当前仓库尚未声明项目原创部分的许可证。复用代码、依赖及 OSM 数据分别遵循各自条件；已有 BSD 声明不等于整仓库采用 BSD。
