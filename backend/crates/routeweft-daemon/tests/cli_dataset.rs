@@ -1248,3 +1248,255 @@ fn guangdong_fixed_sha_reports_conservative_blocker_without_publication() {
         .all(|line| serde_json::from_str::<Value>(line).is_ok()));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Cross-project 5652903 contract: explicit policy, stable structured blocker,
+/// complete audit, and actual exclusion evidence from both real build paths.
+#[test]
+fn empty_role_policy_contract_builds_verifies_and_has_zero_exclusion_residue() {
+    let root = temp("routeweft-5652903-policy-contract");
+    std::fs::create_dir_all(&root).unwrap();
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    let input = root.join("empty-roles.pbf");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--restriction-case", "empty-roles"])
+        .status()
+        .unwrap()
+        .success());
+    let source = input.to_str().unwrap();
+    let source_sha = routeweft_dataset::hash_file(&input).unwrap();
+    let (code, strict) = command(&["preflight", "--input", source, "--profile", "driving"]);
+    assert_eq!(code, 4, "{strict}");
+    assert_eq!(strict["error"]["details"]["policy"], "reject");
+    for (builder, format) in [("memory", "1"), ("external", "2")] {
+        for policy in ["block_ways", "quarantine_ways"] {
+            let output = root.join(format!("{builder}-{policy}"));
+            let (code, response) = command(&[
+                "build",
+                "--input",
+                source,
+                "--profile",
+                "driving",
+                "--output",
+                output.to_str().unwrap(),
+                "--builder",
+                builder,
+                "--format",
+                format,
+                "--invalid-restrictions",
+                policy,
+            ]);
+            if policy == "block_ways" {
+                assert_eq!(code, 4, "{response}");
+                assert_eq!(response["schema"], 1);
+                assert_eq!(response["error"]["kind"], "InvalidDataset");
+                let report = &response["error"]["details"];
+                assert_eq!(report["policy"], policy);
+                assert_eq!(report["source_sha256"], source_sha);
+                assert_eq!(report["valid"], false);
+                let blocker = &report["blockways_failure"];
+                assert_eq!(blocker["relation_id"], 5652903);
+                assert_eq!(blocker["attempt"], 1);
+                assert_eq!(blocker["reason"], "NoSafeFromToMember");
+                assert_eq!(blocker["recoverable"], false);
+                assert!(blocker["members"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|m| m["role"] == ""));
+                for field in [
+                    "planned_blocked_way_ids",
+                    "applied_blocked_way_ids",
+                    "blocked_way_ids",
+                ] {
+                    assert_eq!(report[field], serde_json::json!([]));
+                }
+                assert_eq!(report["restriction_audit"]["scan_complete"], true);
+                assert_eq!(report["restriction_audit"]["truncated"], false);
+                assert!(!output.exists());
+                continue;
+            }
+            assert_eq!(code, 0, "{response}");
+            let report = &response["report"];
+            assert_eq!(report["valid"], true);
+            assert_eq!(report["policy"], policy);
+            assert_eq!(report["source_sha256"], source_sha);
+            assert!(report["blockways_failure"].is_null());
+            for field in [
+                "planned_blocked_way_ids",
+                "applied_blocked_way_ids",
+                "blocked_way_ids",
+            ] {
+                assert_eq!(report[field], serde_json::json!([10, 20]));
+            }
+            assert_eq!(report["restriction_audit"]["scan_complete"], true);
+            assert_eq!(report["restriction_audit"]["truncated"], false);
+            assert_eq!(
+                response["manifest"]["diagnostics"]["quarantine_ways_policy_v1"],
+                1
+            );
+            let excluded = root.join(format!("excluded-{builder}.json"));
+            std::fs::write(&excluded, b"[10,20]\n").unwrap();
+            let (code, verified) = command(&["verify", "--dataset", output.to_str().unwrap()]);
+            assert_eq!(code, 0, "{verified}");
+            let (code, coverage) = command(&[
+                "coverage",
+                "--dataset",
+                output.to_str().unwrap(),
+                "--excluded-ways",
+                excluded.to_str().unwrap(),
+            ]);
+            assert_eq!(code, 0, "{coverage}");
+            assert_eq!(coverage["coverage"]["excluded_way_edges"], 0);
+            let (code, route) = command(&[
+                "route",
+                "--dataset",
+                output.to_str().unwrap(),
+                "--coordinates",
+                "0,0;0.0009,0",
+                "--radius-m",
+                "10",
+            ]);
+            assert_eq!(code, 0, "{route}");
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn quarantine_cli_rejects_unbounded_dependencies_and_unapproved_rules() {
+    let root = temp("routeweft-quarantine-boundaries");
+    std::fs::create_dir_all(&root).unwrap();
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    for (case, policy, reason) in [
+        (
+            "nested-member",
+            "quarantine_ways",
+            "UnboundedMemberDependency",
+        ),
+        (
+            "nested-only",
+            "quarantine_ways",
+            "UnboundedMemberDependency",
+        ),
+        (
+            "conditional-nested-only",
+            "quarantine_ways",
+            "UnboundedMemberDependency",
+        ),
+        (
+            "unapproved",
+            "quarantine_ways",
+            "QuarantineCategoryNotApproved",
+        ),
+        ("absent-from-to", "block_ways", "ReferencedWayAbsent"),
+        ("nested-only", "block_ways", "UnboundedMemberDependency"),
+        (
+            "conditional-nested-only",
+            "block_ways",
+            "UnboundedMemberDependency",
+        ),
+    ] {
+        let input = root.join(format!("{case}.pbf"));
+        assert!(Command::new("python3")
+            .arg(&script)
+            .arg(&input)
+            .args(["--restriction-case", case])
+            .status()
+            .unwrap()
+            .success());
+        for (builder, format) in [("memory", "1"), ("external", "2")] {
+            let output = root.join(format!("{case}-{builder}-{policy}"));
+            let (code, response) = command(&[
+                "build",
+                "--input",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--profile",
+                "driving",
+                "--builder",
+                builder,
+                "--format",
+                format,
+                "--invalid-restrictions",
+                policy,
+            ]);
+            assert_eq!(code, 4, "{response}");
+            let report = &response["error"]["details"];
+            assert_eq!(report["valid"], false);
+            assert_eq!(report["blockways_failure"]["relation_id"], 5652903);
+            assert_eq!(report["blockways_failure"]["attempt"], 1);
+            assert_eq!(report["blockways_failure"]["reason"], reason);
+            assert_eq!(report["blockways_failure"]["recoverable"], false);
+            assert_eq!(report["applied_blocked_way_ids"], serde_json::json!([]));
+            assert!(!output.exists());
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn quarantine_cli_budget_failure_never_publishes_and_capabilities_remain_explicit() {
+    let root = temp("routeweft-quarantine-budget-contract");
+    std::fs::create_dir_all(&root).unwrap();
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    let input = root.join("input.pbf");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .args(["--restriction-case", "empty-roles"])
+        .status()
+        .unwrap()
+        .success());
+    for (builder, format) in [("memory", "1"), ("external", "2")] {
+        for (flag, limit, failure) in [
+            (
+                "--max-blockways-attempts",
+                "1",
+                "BlockWaysAttemptLimitExceeded",
+            ),
+            (
+                "--max-restriction-audit-bytes",
+                "1",
+                "RestrictionAuditLimitExceeded",
+            ),
+        ] {
+            let output = root.join(format!("{builder}-{failure}"));
+            let (code, response) = command(&[
+                "build",
+                "--input",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--profile",
+                "driving",
+                "--builder",
+                builder,
+                "--format",
+                format,
+                "--invalid-restrictions",
+                "quarantine_ways",
+                flag,
+                limit,
+            ]);
+            assert_eq!(code, 4, "{response}");
+            let report = &response["error"]["details"];
+            assert_eq!(report["failure_code"], failure);
+            assert_eq!(report["valid"], false);
+            assert_eq!(report["applied_blocked_way_ids"], serde_json::json!([]));
+            assert!(!output.exists());
+        }
+    }
+    let (code, version) = command(&["version"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        version["invalid_restriction_policies"],
+        serde_json::json!(["reject", "block_ways", "quarantine_ways"])
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
