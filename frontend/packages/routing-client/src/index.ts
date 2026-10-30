@@ -19,7 +19,10 @@ export interface Nearest {
 export interface RouteRequest { coordinates: Point[]; options: ResolvedQueryOptions }
 export interface NearestRequest { coordinate: Point; options: ResolvedQueryOptions }
 /** Host adapters own authentication, wire protocol, response validation and backend error mapping. */
-export interface RoutingTransport {
+export interface RouteTransport {
+  route(request: RouteRequest, signal?: AbortSignal): Promise<RouteResult>;
+}
+export interface RoutingTransport extends RouteTransport {
   route(request: RouteRequest, signal?: AbortSignal): Promise<RouteResult>;
   nearest(request: NearestRequest, signal?: AbortSignal): Promise<Nearest[]>;
 }
@@ -46,7 +49,7 @@ function resolveOptions(options: QueryOptions = {}): ResolvedQueryOptions {
     throw new RoutingError('InvalidInput', 'radius_m must be in (0, 10000]; candidates in [1, 16]');
   return { profile, radius_m, candidates };
 }
-export function createRoutingClient(transport: RoutingTransport) {
+export function createRouteClient(transport: RouteTransport) {
   return {
     async route(coordinates: readonly Point[], options?: QueryOptions, signal?: AbortSignal) {
       if (coordinates.length < 2 || coordinates.length > 10)
@@ -54,6 +57,11 @@ export function createRoutingClient(transport: RoutingTransport) {
       signal?.throwIfAborted();
       return transport.route({ coordinates: coordinates.map(normalizePoint), options: resolveOptions(options) }, signal);
     },
+
+  };
+}
+export function createRoutingClient(transport: RoutingTransport) {
+  return { ...createRouteClient(transport),
     async nearest(coordinate: Point, options?: QueryOptions, signal?: AbortSignal) {
       signal?.throwIfAborted();
       return transport.nearest({ coordinate: normalizePoint(coordinate), options: resolveOptions(options) }, signal);
@@ -72,7 +80,7 @@ export function projectRouteToWorld(route: RouteResult, original: readonly Point
 }
 export type RouteOutcome = { status: 'ok'; route: RouteResult } | { status: 'skipped' | 'superseded' };
 /** One instance per interactive routing control. Direct client calls remain independent. */
-export function createRouteController(client: RoutingClient, config: { now?: () => number } = {}) {
+export function createRouteController(client: Pick<RoutingClient, 'route'>, config: { now?: () => number } = {}) {
   const now = config.now ?? Date.now;
   let generation = 0;
   let active: AbortController | undefined;
