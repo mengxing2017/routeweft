@@ -41,7 +41,7 @@ backend/target/release/routeweft build \
   --output ./datasets/city-driving-external --json > build-result.json
 ```
 
-该模式仍默认 reject，保存的 JSON 包含完整策略审计和磁盘预算统计。默认总 scratch 为 1 GiB / 64 个文件，可通过 [CLI 参数](cli.md#显式磁盘构建) 配置；PBF、对象和图容量上限不随构建模式扩大。加载和查询仍驻内存。
+该模式默认 quarantine_ways，隔离可界定异常关系涉及道路后继续构建，保存的 JSON 包含完整策略审计和磁盘预算统计。默认总 scratch 为 1 GiB / 64 个文件，可通过 [CLI 参数](cli.md#显式磁盘构建) 配置；PBF、对象和图容量上限不随构建模式扩大。加载和查询仍驻内存。
 
 以下是 Monaco 范围内的示例坐标，仅在输入覆盖该区域且附近道路可通行时适用；使用其他城市时替换坐标。顺序为 **经度,纬度**：
 
