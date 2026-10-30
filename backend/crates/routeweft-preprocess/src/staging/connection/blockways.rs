@@ -946,6 +946,7 @@ mod tests {
             let memory = crate::prepare(
                 &osm,
                 crate::BuildOptions {
+                    invalid_restrictions: InvalidRestrictionPolicy::Reject,
                     restriction_audit: limits,
                     ..Default::default()
                 },
@@ -1026,7 +1027,14 @@ mod tests {
             InvalidRestrictionPolicy::Reject,
         )
         .unwrap_err();
-        let memory = crate::prepare(&osm, Default::default()).unwrap_err();
+        let memory = crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: crate::InvalidRestrictionPolicy::Reject,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
         assert_eq!(disk.report.restriction_diagnostics.len(), 728);
         assert_eq!(disk.report.nodes, memory.report.nodes);
         assert_eq!(disk.report.edges, memory.report.edges);
@@ -1490,7 +1498,14 @@ mod tests {
         ));
         let staged = source(&parent, &osm);
         let output = parent.join("ready");
-        assert!(crate::prepare(&osm, Default::default()).is_err());
+        assert!(crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: crate::InvalidRestrictionPolicy::Reject,
+                ..Default::default()
+            }
+        )
+        .is_err());
         let policy = InvalidRestrictionPolicy::QuarantineWays;
         let (memory, audit) = crate::prepare(
             &osm,

@@ -881,7 +881,14 @@ mod tests {
                     role: "unknown".into(),
                 });
             }
-            let (graph, memory) = crate::prepare(&osm, Default::default()).unwrap();
+            let (graph, memory) = crate::prepare(
+                &osm,
+                crate::BuildOptions {
+                    invalid_restrictions: crate::InvalidRestrictionPolicy::Reject,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             pipeline(&parent, &osm);
             let report = resolve(&parent, RestrictionOptions::default()).unwrap();
             let sequences: Vec<Vec<usize>> =
@@ -949,7 +956,14 @@ mod tests {
                 "no_right_turn"
             };
             osm.relations.push(relation(3, rule, &members));
-            let memory = crate::prepare(&osm, Default::default()).unwrap_err();
+            let memory = crate::prepare(
+                &osm,
+                crate::BuildOptions {
+                    invalid_restrictions: crate::InvalidRestrictionPolicy::Reject,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
             pipeline(&parent, &osm);
             let disk = resolve(&parent, RestrictionOptions::default()).unwrap_err();
             assert_eq!(
@@ -1080,7 +1094,13 @@ mod local_acceptance {
         emit_edges(&staged, &joined, &edges, StageOptions::default()).unwrap();
         index_adjacency(&edges, &adjacency, StageOptions::default()).unwrap();
         let osm = crate::pbf::read_for_driving(&input).unwrap();
-        let memory = crate::prepare(&osm, Default::default());
+        let memory = crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: crate::InvalidRestrictionPolicy::Reject,
+                ..Default::default()
+            },
+        );
         let disk = resolve_restrictions(
             &staged,
             &joined,
