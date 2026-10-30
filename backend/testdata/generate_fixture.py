@@ -39,6 +39,8 @@ def block(kind, raw, compressed):
 def fixture(dense=False, compressed=True, restriction_case=None, maxspeed="36"):
     strings = ['', 'highway', 'residential', 'maxspeed', maxspeed, 'name', 'Synthetic Road',
                'type', 'restriction', 'no_right_turn', 'from', 'to', 'via']
+    if restriction_case == 'conditional-nested-only':
+        strings += ['restriction:conditional', 'no_right_turn @ (Mo)']
     table = b''.join(data(1, s.encode()) for s in strings)
     points = [(0, 0), (10000, 0), (20000, 0), (20000, 10000)]  # lon, lat / 1e7
     group = b''
@@ -50,7 +52,10 @@ def fixture(dense=False, compressed=True, restriction_case=None, maxspeed="36"):
     else:
         for i, (lon, lat) in enumerate(points,1):
             group += data(1, integer(1,zig(i)) + integer(8,zig(lat)) + integer(9,zig(lon)))
-    for way_id, refs in [(10,[1,2,3]), (20,[3,4])]:
+    ways = [(10,[1,2,3]), (20,[3,4])]
+    if restriction_case in ('empty-roles', 'nested-member', 'unapproved', 'absent-from-to'):
+        ways.append((30, [1,2]))  # Independent retained road after quarantine.
+    for way_id, refs in ways:
         deltas = [refs[0]] + [refs[i]-refs[i-1] for i in range(1,len(refs))]
         way = integer(1,way_id) + packed(2,[1,3,5]) + packed(3,[2,4,6]) + packed(8,map(zig,deltas))
         group += data(3,way)
@@ -61,9 +66,20 @@ def fixture(dense=False, compressed=True, restriction_case=None, maxspeed="36"):
             members.insert(1, (999, 0, 12))
         elif restriction_case == 'valid':
             members.insert(1, (3, 0, 12))
+        elif restriction_case in ('empty-roles', 'nested-member', 'unapproved'):
+            members = [(10, 1, 0), (20, 1, 0)]
+            if restriction_case == 'nested-member':
+                members.append((999, 2, 12))
+        elif restriction_case in ('nested-only', 'conditional-nested-only'):
+            members = [(999, 2, 12)]
+        elif restriction_case == 'absent-from-to':
+            members = [(998, 1, 10), (10, 1, 12), (999, 1, 11)]
         ids = [m[0] for m in members]
         deltas = [ids[0]] + [ids[i] - ids[i-1] for i in range(1, len(ids))]
-        relation = (integer(1, 6843783) + packed(2, [7, 8]) + packed(3, [8, 9])
+        relation_id = 5652903 if restriction_case in ('empty-roles', 'nested-member', 'unapproved', 'absent-from-to', 'nested-only', 'conditional-nested-only') else 6843783
+        rule_index = 6 if restriction_case == 'unapproved' else 9
+        keys, values = ([7, 13], [8, 14]) if restriction_case == 'conditional-nested-only' else ([7, 8], [8, rule_index])
+        relation = (integer(1, relation_id) + packed(2, keys) + packed(3, values)
                     + packed(8, [m[2] for m in members]) + packed(9, map(zig, deltas))
                     + packed(10, [m[1] for m in members]))
         group += data(4, relation)
@@ -109,7 +125,7 @@ if __name__ == '__main__':
     parser.add_argument('output',type=Path)
     parser.add_argument('--dense',action='store_true')
     parser.add_argument('--raw',action='store_true')
-    parser.add_argument('--restriction-case', choices=['missing-via', 'missing-reference', 'valid'])
+    parser.add_argument('--restriction-case', choices=['missing-via', 'missing-reference', 'valid', 'empty-roles', 'nested-member', 'unapproved', 'absent-from-to', 'nested-only', 'conditional-nested-only'])
     parser.add_argument('--padding-nodes', type=int, default=0)
     parser.add_argument('--maxspeed', default='36')
     parser.add_argument('--chain-nodes', type=int, default=0)
