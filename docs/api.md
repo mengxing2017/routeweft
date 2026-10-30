@@ -68,3 +68,5 @@ let route = runtime.route(engine, coordinates, QueryOptions::default(), deadline
 默认加载采用 city 档位，区域宿主需配置 `RuntimeConfig.load.capacity` 与对应预算。`DatasetIdentity::verify` 只负责期望身份与 manifest 的完整比对，图结构与摘要校验仍由 dataset/Engine 的加载 API 完成。runtime 的真实配额保持、文件保活和准备校验语义见 `backend/crates/routeweft-runtime/README.md`。
 
 本次 runtime 提取已使用 Rust 1.85.0、`--locked --offline` 验证 dataset/routing/runtime 的编译与测试；workspace 继续声明 edition 2021、Rust 1.85。宿主可使用更高版本工具链。
+
+资源估算 API：`routeweft_dataset::estimate_resident` 与 `check_resident_budget` 共用公式；`resource_plan` 在不构造查询索引的前提下验证磁盘产物并返回版本化需求，`resource_plan_from_manifest` 仅供已认证 manifest 使用。详见 [资源规划契约](resource-planning.md)。
