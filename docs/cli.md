@@ -254,3 +254,7 @@ cargo test --release --manifest-path backend/Cargo.toml -p routeweft-daemon \
 `customize` 的 `--max-index-bytes` 独立控制逻辑索引工作区，默认 2 GiB；`--max-load-bytes` 控制数据加载估算。可显式配置 `--levels`（1..4，默认 3）、`--max-boundary`（1..1024，默认 128）、`--max-shortcuts`（默认 20000000）。边界过多的 cell 会保守回退低层图，较小索引并不保证省级查询能在默认工作量内完成。提高层数/边界上限会增加离线定制时间、索引体积和加载内存，必须以完整查询证据验证；这与提高查询 deadline/work budget 不同。
 
 路径返回前会重放解包后的原始边、限制状态及总成本，诊断新增 `validated_route_edges`。`coverage --excluded-ways FILE.json` 要求升序唯一的 way ID 数组（文件最多 4 MiB），返回实际残留边数；不能用诊断的 planned 数量代替这项检查。
+
+## 资源规划
+
+新增 `resource-plan --dataset DIR --graph-capacity city|regional [--max-load-bytes N] [--max-plan-workspace-bytes N] --json`，不加载查询引擎，返回经过身份和图完整性校验的版本化逻辑资源估算。build 成功响应也新增 `resource_plan`。字段、v1 校验范围及未知项见 [资源规划契约](resource-planning.md)。
