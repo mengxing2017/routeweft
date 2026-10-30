@@ -1,4 +1,6 @@
 //! Versioned, bounded, immutable routing dataset. No process-global resources.
+mod identity;
+pub use identity::{is_digest, DatasetIdentity};
 mod adjacency;
 mod binary;
 mod publication;
