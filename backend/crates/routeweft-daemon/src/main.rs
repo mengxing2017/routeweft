@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways|quarantine_ways] [--json]\nrouteweft audit-restrictions --input FILE.osm.pbf --output DIR [--max-memory-bytes N] [--json]\nrouteweft coverage --dataset DIR [--excluded-ways FILE.json] [load limits]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N] [--max-index-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways|quarantine_ways (default quarantine_ways); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways/quarantine_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways|quarantine_ways] [--json]\nrouteweft audit-restrictions --input FILE.osm.pbf --output DIR [--max-memory-bytes N] [--json]\nrouteweft resource-plan --dataset DIR [--graph-capacity city|regional] [--max-plan-workspace-bytes N] [--json]\nrouteweft coverage --dataset DIR [--excluded-ways FILE.json] [load limits]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N] [--max-index-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways|quarantine_ways (default quarantine_ways); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways/quarantine_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -105,6 +105,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             | "version"
             | "inspect"
             | "verify"
+            | "resource-plan"
             | "coverage"
             | "nearest"
             | "route"
@@ -150,6 +151,12 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         ],
         "version" => &[],
         "inspect" => &["--dataset", "--mode", "--graph-capacity"],
+        "resource-plan" => &[
+            "--dataset",
+            "--graph-capacity",
+            "--max-load-bytes",
+            "--max-plan-workspace-bytes",
+        ],
         "coverage" => &[
             "--dataset",
             "--graph-capacity",
@@ -238,7 +245,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
             "build":serde_json::from_str::<Value>(include_str!(concat!(env!("OUT_DIR"), "/build-identity.json"))).expect("build identity"),
             "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
-            "commands":["build","audit-restrictions","preflight","inspect","verify","coverage","nearest","route","customize","serve","version"],
+            "commands":["resource-plan","build","audit-restrictions","preflight","inspect","verify","coverage","nearest","route","customize","serve","version"],
             "invalid_restriction_policies":["reject","block_ways","quarantine_ways"],
             "invalid_maxspeed_policies":["reject","use_default"],
             "capabilities": {
@@ -247,6 +254,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 "graph_capacity_profiles": {"city":{"nodes":1000000,"edges":2000000,"bytes":268435456,"span_degrees":5},
                     "regional":{"nodes":8000000,"edges":16000000,"bytes":2147483648_u64,"span_degrees":10,"builder":"external","format":2}},
                 "routing_acceleration":{"algorithm":"mld","file":"routing.mld","version":1,"optional":true,"restriction_edges":"explicit"},
+                "resource_plan":{"schema":1,"estimator_version":routeweft_dataset::ESTIMATOR_VERSION,"command":"resource-plan","build_output":true,"query_indexes_constructed":false},
                 "resident_jsonl":true,
                 "v2_verify":"streaming", "runtime_memory_budget_kind":"estimated_allocations_not_rss",
                 "large_pbf_3gib":false, "dataset_access":"in_memory",
@@ -510,8 +518,10 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                 },
             )
             .map_err(build_error)?;
+            let plan = routeweft_dataset::resource_plan_from_manifest(&built.manifest, load_limits)
+                .map_err(data_error)?;
             return Ok(
-                json!({"schema":1,"status":"ok","manifest":built.manifest,"report":built.report,
+                json!({"schema":1,"status":"ok","resource_plan":plan,"manifest":built.manifest,"report":built.report,
                 "build":{"builder":"external","resources":built.resources}}),
             );
         }
@@ -522,10 +532,29 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             format,
         )
         .map_err(build_error)?;
-        return Ok(json!({"schema":1,"status":"ok","manifest":m,"report":report}));
+        let plan =
+            routeweft_dataset::resource_plan_from_manifest(&m, load_limits).map_err(data_error)?;
+        return Ok(
+            json!({"schema":1,"status":"ok","manifest":m,"report":report,"resource_plan":plan}),
+        );
     }
 
     let dataset = Path::new(required("--dataset")?);
+    if command == "resource-plan" {
+        let workspace = flags
+            .get("--max-plan-workspace-bytes")
+            .map(|v| {
+                v.parse::<u64>()
+                    .map_err(|_| bad("invalid --max-plan-workspace-bytes"))
+            })
+            .unwrap_or(Ok(64 * 1024 * 1024))?;
+        let plan = routeweft_dataset::resource_plan(dataset, load_limits, workspace)
+            .map_err(data_error)?;
+        return Ok(
+            json!({"schema":1,"status":"ok","graph_capacity":graph_capacity,"resource_plan":plan}),
+        );
+    }
+
     if command == "inspect" {
         match flags.get("--mode").copied().unwrap_or("full") {
             "metadata" => {
