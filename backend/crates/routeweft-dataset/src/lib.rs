@@ -185,48 +185,7 @@ impl Default for LoadOptions {
 /// arithmetic is checked; include spare vector capacity, strings/dictionary,
 /// allocator overhead and (optionally) CSR, R-tree construction and turn trie.
 pub fn check_resident_budget(m: &Manifest, limits: LoadOptions, indexes: bool) -> Result<u64> {
-    // The v1 serde visitors enforce legacy ceilings before manifest counts can
-    // be checked. Reserve that worst case against forged count declarations.
-    let legacy = LoadOptions::default();
-    let nodes = if m.format == 1 {
-        legacy.max_nodes
-    } else {
-        m.nodes
-    };
-    let edges = if m.format == 1 {
-        legacy.max_edges
-    } else {
-        m.edges
-    };
-    let refs = if m.format == 1 {
-        legacy.max_restriction_edges as u64
-    } else {
-        (m.restrictions as u64)
-            .saturating_mul(256)
-            .min(limits.max_restriction_edges as u64)
-    };
-    let strings = (edges as u64).saturating_mul(4160).min(256 * 1024 * 1024);
-    // Up to two dictionary entries per edge, including unused 4096-byte
-    // entries; class length only constrains strings actually used as classes.
-    let dictionary = (edges as u64)
-        .saturating_mul(2 * (4096 + 4 + 64))
-        .min(256 * 1024 * 1024);
-    let estimated = (nodes as u64)
-        .checked_mul(if indexes { 128 } else { 32 })
-        .and_then(|n| {
-            (edges as u64)
-                .checked_mul(if indexes { 576 } else { 256 })
-                .and_then(|e| n.checked_add(e))
-        })
-        .and_then(|n| {
-            refs.checked_mul(if indexes { 320 } else { 64 })
-                .and_then(|r| n.checked_add(r))
-        })
-        .and_then(|n| {
-            n.checked_add(strings)
-                .and_then(|n| n.checked_add(dictionary))
-        })
-        .ok_or(Error::LimitExceeded)?;
+    let estimated = estimate_resident(m, limits, indexes)?.estimated_bytes;
     if estimated > limits.max_resident_bytes {
         return Err(resource_limit(
             "estimated_resident_bytes",
