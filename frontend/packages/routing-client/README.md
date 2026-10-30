@@ -60,3 +60,11 @@ make release-frontend-publish
 
 发布当前工作区的包，先测试和重新打包，再上传。配置方法及 Devbox 入口见
 [私有发布说明](../../../docs/private-release.md#前端-npm-包发布)。
+
+## 0.2 migration
+
+`createRouteClient` accepts a route-only transport; `createRoutingClient` still requires route and nearest. Controllers accept either client's route capability. Coordinates are checked against the Rust engine latitude range [-85, 85].
+
+`createRoutePlanner` exposes immutable snapshots/subscriptions, 2–10 waypoint editing, picking, swap, clear, cancellation and calculation. Generation checks suppress stale results and errors even when the transport ignores AbortSignal. The planner retains original world coordinates; the client normalizes only the request.
+
+MapLibre rendering lives in the optional `@routeweft/maplibre` peer adapter. See its runnable example and resource lifecycle API.
