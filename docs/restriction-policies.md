@@ -1,6 +1,6 @@
 # 限制关系政策与省级验收
 
-默认 `reject` 拒绝无法完整解析的静态 driving 限制。`block_ways` 保留原有要求：异常关系必须具有可界定且可用的 from/to。新增 `quarantine_ways` 是显式、非等价的保守降级：仅对批准的异常类别，依据完整原始 relation 排除全部现存 way 成员，不推断空 role。
+默认 `quarantine_ways` 隔离依赖可界定的异常限制涉及的现存道路，继续转换其他路网，并在成功报告中保存告警与实际排除清单。显式 `reject` 提供严格拒绝模式。`block_ways` 保留原有要求：异常关系必须具有可界定且可用的 from/to。`quarantine_ways` 是允许覆盖损失的保守降级：仅对批准的异常类别，依据完整原始 relation 排除全部现存 way 成员，不推断空 role。
 
 未知/嵌套 relation 依赖、无可封道路、未批准规则、成员/封路/轮次/审计预算超限仍拒绝。`no_right_turn_on_red` 仅在新政策下隔离全部成员道路，不能解释为全天 no_right_turn。产物通过 `quarantine_ways_policy_v1` 与实际排除清单标识降级；发布校验核对政策、源 SHA、诊断及排除计数。不能将 `planned` 当成 `applied`。
 
@@ -11,7 +11,7 @@
 | 相同前缀的多个 only | 先合并允许出口；出口因隔离消失后重新求值 |
 | 车型标签 / except | 按既有 driving 优先级选择，非适用关系不编译 |
 | 条件道路、适用的条件转向 | 保守封路，不计算时间条件 |
-| 空 role、缺 from/to/via、不可达或缺失引用 | reject 拒绝；新政策在依赖可界定时隔离全部现存 way |
+| 空 role、缺 from/to/via、不可达或缺失引用 | 显式 reject 拒绝；默认在依赖可界定时隔离全部现存 way |
 | 嵌套关系、未知限制值、解析预算超限 | 拒绝，不输出部分限制 |
 
 隔离集合单调增长，当前每轮完整重建拓扑直至固定点，复用不可变源暂存；尚未实现仅重算受影响关系的工作队列。节点引用闭包按 `(node,way,ordinal)` 外排后顺序连接，源引用完整性与 retained graph 分开核验。
@@ -45,7 +45,7 @@ routeweft serve --dataset dataset --graph-capacity regional --max-load-bytes 128
 
 ## 5652903 失败与依赖边界契约（2026-10-30）
 
-宿主显式选择 `block_ways` 时，空 from/to role 继续返回 `NoSafeFromToMember`。RouteWeft CLI/库自身默认仍为 `reject`；本轮不修改任何默认政策。`blockways_failure.recoverable=false` 表示当前策略不能继续，不表示源修订或另行审核后的显式隔离路径也无效。消费者读取结构化 `error.details`，不得解析 message 自动切换政策。
+宿主显式选择 `block_ways` 时，空 from/to role 继续返回 `NoSafeFromToMember`。RouteWeft CLI/库默认现为 `quarantine_ways`。宿主若仍显式传入 `block_ways`，需修改为 `quarantine_ways` 或省略该参数才能采用默认容错策略；程序不暗中覆盖显式策略。`blockways_failure.recoverable=false` 表示当前策略不能继续，不表示源修订或另行审核后的显式隔离路径也无效。消费者读取结构化 `error.details`，不得解析 message 自动切换政策。
 
 | 情况 | 结构化处置 |
 | --- | --- |
