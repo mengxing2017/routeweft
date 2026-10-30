@@ -95,3 +95,5 @@ python3 scripts/release.py publish --registry internal --stage /tmp/routeweft-re
 `release-check` 扫描受 Git 跟踪的当前文件；私有发布匹配目标索引域名，公共发布匹配环境中已配置的私有索引域名。公共发布不会把 crates.io 的公共域名当作私有地址。也可通过 Python 入口的 `--patterns <文件>` 指定需要拦截的私有地址，尤其是没有私有索引环境变量时。准备阶段还会扫描实际提交快照。该检查只覆盖已知域名，不是完整来源或许可证审计。Cargo 生成的 manifest/锁文件可能包含内部索引地址，脚本仅对这两个文件中的精确索引值作扫描豁免；这些私有归档不能作为公开附件。
 
 Cargo 日志实时输出，URL 和环境凭据在显示前脱敏；连续 15 秒没有新日志时显示等待状态和累计用时。按 Ctrl+C 会停止 Cargo 及其子进程，再清理临时目录。脚本兼容普通归档目录及 Cargo 的 tmp-crate/tmp-registry 临时布局，同名归档内容不一致时停止。失败时也可使用保留的临时副本在内部受控环境诊断。dry-run 不证明服务端允许最终上传，也不能替代发布后的无本地 override 消费验证。基础包发布后，仍需修改并验证私有 SDK 的 registry 依赖来源，然后独立验收消费者。
+
+前端 TypeScript 接口包使用独立 npm 版本和发布命令，见[前端远程发布指南](frontend-release.md)及[外部使用指南](frontend-usage.md)。
