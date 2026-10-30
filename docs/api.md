@@ -30,7 +30,7 @@ NodeEngine 保留节点级 P0 搜索，只有合成图用途，不提供持久�
 
 ## 构建宿主与预检
 
-构建宿主可依赖 `routeweft-preprocess`：`preflight(&Path, BuildOptions)` 返回 InputReport，不写数据集；`build_with_options(&Path, &Path, BuildOptions)` 返回 `(Manifest, InputReport)`。`prepare(&Osm, BuildOptions)` 用于已解码对象。默认 build/graph 使用 Reject，显式选项为 InvalidRestrictionPolicy::BlockWays。
+构建宿主可依赖 `routeweft-preprocess`：`preflight(&Path, BuildOptions)` 返回 InputReport，不写数据集；`build_with_options(&Path, &Path, BuildOptions)` 返回 `(Manifest, InputReport)`。`prepare(&Osm, BuildOptions)` 用于已解码对象。默认 build/graph 使用 QuarantineWays，隔离可界定的异常限制涉及道路并保留审计；显式 Reject 用于严格拒绝，BlockWays 保留原 from/to 要求。
 
 预处理错误类型为 `routeweft_preprocess::Error`，保留底层 source 和结构化 report；不再要求调用者解析 InvalidDataset 的文本。Relation 现在保留源 id；直接构造测试 OSM 时须提供唯一关系 ID。消费者应固定提交并重新编译，不能假定 0.x 内部类型向后兼容。
 
