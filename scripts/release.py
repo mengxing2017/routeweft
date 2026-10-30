@@ -106,9 +106,9 @@ def load_release_env():
             raise ReleaseInputError(
                 f'.private-release.env 第 {number} 行须使用 KEY=value 格式。')
         key, value = fields[0].split('=', 1)
-        if key not in ('NPM_REGISTRY_INTERNAL', 'NPM_TOKEN_INTERNAL') and not re.fullmatch(r'CARGO_(?:REGISTRY|REGISTRIES_[A-Z0-9_]+)_[A-Z0-9_]+', key):
+        if key not in ('NPM_REGISTRY', 'NPM_TOKEN', 'NPM_REGISTRY_INTERNAL', 'NPM_TOKEN_INTERNAL') and not re.fullmatch(r'CARGO_(?:REGISTRY|REGISTRIES_[A-Z0-9_]+)_[A-Z0-9_]+', key):
             raise ReleaseInputError(
-                f'.private-release.env 第 {number} 行须使用 Cargo registry 配置变量。')
+                f'.private-release.env 第 {number} 行须使用 Cargo 或 npm registry 配置变量。')
         values[key] = value
     for key, value in values.items():
         os.environ.setdefault(key, value)
