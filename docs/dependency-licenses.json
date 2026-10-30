@@ -191,6 +191,16 @@
     ]
   },
   {
+    "name": "pin-project-lite",
+    "version": "0.2.17",
+    "license": "Apache-2.0 OR MIT",
+    "source": "https://crates.io/crates/pin-project-lite/0.2.17",
+    "notices": [
+      "LICENSES/dependencies/pin-project-lite-0.2.17/LICENSE-APACHE",
+      "LICENSES/dependencies/pin-project-lite-0.2.17/LICENSE-MIT"
+    ]
+  },
+  {
     "name": "proc-macro2",
     "version": "1.0.107",
     "license": "MIT OR Apache-2.0",
@@ -308,6 +318,24 @@
     "notices": [
       "LICENSES/dependencies/syn-2.0.119/LICENSE-APACHE",
       "LICENSES/dependencies/syn-2.0.119/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "tokio",
+    "version": "1.48.0",
+    "license": "MIT",
+    "source": "https://crates.io/crates/tokio/1.48.0",
+    "notices": [
+      "LICENSES/dependencies/tokio-1.48.0/LICENSE"
+    ]
+  },
+  {
+    "name": "tokio-macros",
+    "version": "2.6.1",
+    "license": "MIT",
+    "source": "https://crates.io/crates/tokio-macros/2.6.1",
+    "notices": [
+      "LICENSES/dependencies/tokio-macros-2.6.1/LICENSE"
     ]
   },
   {
