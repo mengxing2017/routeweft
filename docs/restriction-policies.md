@@ -42,3 +42,23 @@ routeweft serve --dataset dataset --graph-capacity regional --max-load-bytes 128
 `scripts/prepare-routing-extract.py` 要求同快照父源 SHA、边界和显式 osmium 可执行文件；使用 smart restriction 闭包并检查引用，保存派生 manifest。没有父源时不能从不完整子集恢复缺失对象，更不能猜空 role。
 
 `scripts/validate-regional-routing.py` 保留每条成功与失败查询，以实际道路距离分组，使用默认生产查询预算；精确 Dijkstra 样本单独设置对照预算。完整验收还需要源数据溯源、覆盖差异、宿主安装 smoke、断路/单行/via-way/途经点用例及同输入外部引擎对比，不能只看构建成功。
+
+## 5652903 失败与依赖边界契约（2026-10-30）
+
+宿主显式选择 `block_ways` 时，空 from/to role 继续返回 `NoSafeFromToMember`。RouteWeft CLI/库自身默认仍为 `reject`；本轮不修改任何默认政策。`blockways_failure.recoverable=false` 表示当前策略不能继续，不表示源修订或另行审核后的显式隔离路径也无效。消费者读取结构化 `error.details`，不得解析 message 自动切换政策。
+
+| 情况 | 结构化处置 |
+| --- | --- |
+| `block_ways` 缺安全 from/to role | `NoSafeFromToMember` |
+| `block_ways` 有 from/to role，但这些 way 都不存在 | `ReferencedWayAbsent`，保留计划/实际集合的区别 |
+| 有嵌套 relation 或未知类型成员 | 两种封路政策均为 `UnboundedMemberDependency`；无可见 way 或带条件标签也不能据此判无关 |
+| 已进入隔离判定但无现存 way | `NoPresentWayMember`；不伪造可隔离集合 |
+| 隔离类别不在批准范围 | `QuarantineCategoryNotApproved` |
+| 没有新增可排除道路 | 协调器的 `NoNewExclusions` 防护，不无限重试 |
+| 轮次/审计/成员引用预算耗尽 | 资源错误及已有 failure_code；不发布未完成图 |
+
+对普通、仅含有界 node/way 且没有 retained way 的关系，仍可判为不适用于当前 driving 图，不要求为了生成 blocker 而隔离无关道路。嵌套或未知依赖不同：没有展开其依赖就不能证明不相关。本轮在 resolver 的相关性提前返回、内存路径的无邻接优化以及条件规则提前返回之前检查该边界；未实现递归解析嵌套限制。
+
+失败诊断里的 `members` 最多投影 256 项；`members_truncated=true` 与 `restriction_audit.truncated=true` 含义不同。前者是单条成员证据投影，隔离决策仍读取完整原始关系；后者表示整体审计未完整保留，不能继续封路发布。blocker 的 members 同样是投影，不能从它猜测被截断成员。relation ID、attempt、reason、recoverable、source SHA 与计划/实际集合沿用既有字段，无新增同义字段或能力枚举。
+
+成功隔离须核对 `planned_blocked_way_ids == applied_blocked_way_ids == blocked_way_ids`、无 blocker、完整审计、政策版本标记及 coverage 零残留，再进行 verify/route。合成 5652903 fixture 仅复现异常结构，不代表真实关系坐标/完整成员证据，更不能代替指定输入 SHA 的省级验收。
