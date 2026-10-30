@@ -39,7 +39,7 @@ routeweft build --input city.osm.pbf --profile driving --output city-external/ \
   --max-scratch-bytes 1073741824 --max-scratch-files 64 --json
 ```
 
-`--builder memory` 是默认值，支持格式 1/2。`--builder external` 必须同时指定 `--format 2`，采用磁盘暂存、构图及完整校验后发布；两者使用相同的 driving-v1 和 reject/block_ways 策略。默认严格拒绝，外存模式不会自动排除无效限制。
+`--builder memory` 是默认值，支持格式 1/2。`--builder external` 必须同时指定 `--format 2`，采用磁盘暂存、构图及完整校验后发布；两者使用相同的 driving-v1 和限制策略。默认 quarantine_ways 隔离可界定的异常关系所涉及道路，继续构建；显式 reject 严格拒绝。
 
 `--scratch-dir` 指定工作目录的父目录，默认使用输出父目录；它须在输出目录之外，并与输出位于同一文件系统，以便最终 rename。工具只清理自己创建的私有工作目录，不删除 scratch 父目录或其他文件。输出须不存在，包括空目录和链接。源 PBF 在构建期间须保持不变，提交前会再次核对摘要。
 
@@ -173,9 +173,9 @@ routeweft build --input region.osm.pbf --profile driving --builder external \
 
 ## 限制关系诊断与显式保守模式
 
-build/preflight 接受 `--invalid-restrictions reject|block_ways`，默认 reject，不提供 ignore 选项。
+build/preflight 接受 `--invalid-restrictions reject|block_ways|quarantine_ways`，默认 quarantine_ways，不提供 ignore 选项。成功报告保留隔离告警、计划及实际排除清单；其他正常路网继续转换。显式 reject 为严格模式，block_ways 保留要求安全 from/to 的原语义。
 
-缺少 via 的相关机动车限制保持严格失败，示例（省略其他 report 字段）：
+显式 `--invalid-restrictions reject` 时，缺少 via 的相关机动车限制严格失败，示例（省略其他 report 字段）：
 
 ```json
 {"schema":1,"status":"error","error":{"kind":"InvalidDataset","message":"relation 6843783: MissingVia: restriction has no via member; turn location is not inferred","details":{"valid":false,"policy":"reject","failure_code":"InvalidRestriction","restriction_diagnostics":[{"relation_id":6843783,"code":"MissingVia","action":"rejected","tags":{"restriction":"no_right_turn","type":"restriction"},"members":[{"kind":"way","id":389194568,"role":"from"},{"kind":"way","id":389190340,"role":"to"}],"members_truncated":false}]}}}
