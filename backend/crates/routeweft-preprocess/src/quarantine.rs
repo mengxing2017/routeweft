@@ -13,6 +13,9 @@ pub(crate) fn failure(
     code: &str,
     present: &BTreeSet<i64>,
 ) -> Option<&'static str> {
+    if relation.members.iter().any(|m| m.kind > 1) {
+        return Some("UnboundedMemberDependency");
+    }
     if policy == InvalidRestrictionPolicy::QuarantineWays {
         if !matches!(
             code,
@@ -34,9 +37,6 @@ pub(crate) fn failure(
             .is_some_and(|rule| rule == "no_right_turn_on_red"))
         {
             return Some("QuarantineCategoryNotApproved");
-        }
-        if relation.members.iter().any(|m| m.kind > 1) {
-            return Some("UnboundedMemberDependency");
         }
         if !relation
             .members

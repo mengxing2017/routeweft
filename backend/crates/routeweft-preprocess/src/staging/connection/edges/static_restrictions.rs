@@ -515,7 +515,9 @@ pub(crate) fn resolve_with_audit(
                 count(&mut stats, key);
                 return Ok(());
             }
-            if restrictions::conditional(&rel) {
+            if restrictions::conditional(&rel)
+                && restrictions::dependency_diagnostic(&rel).is_none()
+            {
                 return Ok(());
             }
             access.budget = AccessBudget::new(options.relation_access_bytes);

@@ -428,12 +428,17 @@ fn graph_attempt_with_audit(
             count(&mut stats, key);
             continue;
         }
-        if restrictions::conditional(rel) {
+        let dependency = restrictions::dependency_diagnostic(rel);
+        if restrictions::conditional(rel) && dependency.is_none() {
             continue;
         }
-        let resolved = outgoing.as_ref().map_or(Ok(None), |outgoing| {
-            restrictions::resolve(rel, osm, &mapping, &by_way, &edges, outgoing)
-        });
+        let resolved = if let Some(diagnostic) = dependency {
+            Err(Box::new(diagnostic))
+        } else {
+            outgoing.as_ref().map_or(Ok(None), |outgoing| {
+                restrictions::resolve(rel, osm, &mapping, &by_way, &edges, outgoing)
+            })
+        };
         match resolved {
             Ok(Some((rule, sequences))) => {
                 for sequence in sequences {

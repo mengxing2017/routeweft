@@ -9,6 +9,17 @@ use routeweft_dataset::Edge;
 use std::collections::BTreeMap;
 
 pub(crate) type Resolved = Option<(String, Vec<Vec<usize>>)>;
+/// Relevance cannot be proved from visible ways when a member may itself
+/// reference roads. Run before the no-retained-road and conditional shortcuts.
+pub(crate) fn dependency_diagnostic(rel: &Relation) -> Option<RestrictionDiagnostic> {
+    rel.members.iter().any(|member| member.kind > 1).then(|| {
+        RestrictionDiagnostic::new(
+            rel,
+            "UnsupportedViaShape",
+            "unbounded restriction member dependency",
+        )
+    })
+}
 pub(crate) fn applies(rel: &Relation) -> bool {
     value(&rel.tags, "type") == "restriction"
         && !value(&rel.tags, "except")
@@ -132,6 +143,9 @@ pub(crate) fn resolve_with(
     rel: &Relation,
     access: &mut impl Access,
 ) -> std::result::Result<Resolved, ResolveError> {
+    if let Some(diagnostic) = dependency_diagnostic(rel) {
+        return Err(ResolveError::Diagnostic(Box::new(diagnostic)));
+    }
     let fail = |code, message: &str| {
         ResolveError::Diagnostic(Box::new(RestrictionDiagnostic::new(rel, code, message)))
     };
