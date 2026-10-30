@@ -22,7 +22,7 @@ pnpm --dir frontend build
 
 [`@routeweft/routing-client`](packages/routing-client/README.md) 提供独立可打包的 TypeScript 接口、route/nearest 客户端与交互请求控制器。它不依赖首页或地图组件，宿主注入 HTTP/IPC 传输。构建、测试和下游安装方式见包内文档。
 
-`routing-client` 0.2 新增 route-only transport 和无框架 planner。可选 [`@routeweft/maplibre`](packages/maplibre/README.md) 管理路线图层与标记，并提供无服务依赖的本地 fixture 示例：
+`routing-client` `0.1.0-pre` 提供 route-only transport 和无框架 planner。可选 [`@routeweft/maplibre`](packages/maplibre/README.md) 管理路线图层与标记，并提供无服务依赖的本地 fixture 示例：
 
 ```bash
 pnpm --dir frontend install
@@ -31,3 +31,5 @@ pnpm --dir frontend/packages/maplibre example
 ```
 
 两个包均不依赖 Ops DTO、认证或 UI 框架。
+
+外部集成见[使用指南](../docs/frontend-usage.md)；版本管理、公共/私有 npm 发布与验收见[发布指南](../docs/frontend-release.md)。

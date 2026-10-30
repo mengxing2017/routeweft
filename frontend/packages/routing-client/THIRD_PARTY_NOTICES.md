@@ -1,7 +1,7 @@
 # Sources and distribution
 
 Request coordination and world-copy handling in src/index.ts are adapted from:
-- /home/dev/test/osrm-frontend, commit ab85f4fb05e762339475b8771a30622e9856c02f
+- https://github.com/Project-OSRM/osrm-frontend/tree/ab85f4fb05e762339475b8771a30622e9856c02f
 - src/router_patches.js (longitude wrapping, world projection, abort/stale response handling)
 - src/route_throttle.js (preview backoff: 4 seconds, doubling to 30 seconds after repeated failure)
 

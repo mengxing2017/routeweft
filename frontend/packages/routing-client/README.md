@@ -2,7 +2,17 @@
 
 供下游前端使用的独立 ESM / TypeScript 包，无运行时依赖，不要求 React、Leaflet 或 DOM 页面。运行环境须支持 AbortController（现代浏览器或 Node.js 18+）。
 
-## 构建与安装
+## 安装
+
+发布到目标 npm registry 后，下游固定版本安装：
+
+```sh
+npm install --save-exact @routeweft/routing-client@0.1.0-pre
+```
+
+私有 registry 配置、完整 transport/planner 示例见[外部使用指南](https://github.com/mengxing2017/routeweft/blob/main/docs/frontend-usage.md)。
+
+## 本地构建与打包
 
 ```sh
 cd frontend/packages/routing-client
@@ -10,10 +20,10 @@ npm ci
 npm test
 npm pack
 # 在下游工程中安装上一步生成的包（替换实际路径）
-npm install /path/to/routeweft-routing-client-0.1.0.tgz
+npm install /path/to/routeweft-routing-client-0.1.0-pre.tgz
 ```
 
-包包含编译后的 JS、类型声明和第三方声明。没有公共发布配置；项目原创代码许可尚未确定。
+包包含编译后的 JS、类型声明和第三方声明。支持显式指定公共或私有 npm registry；项目原创代码许可维持第三方声明中的现有说明。
 
 ## 下游接入
 
@@ -41,7 +51,7 @@ export function createMapRouting(hostRouting: RoutingTransport) {
 // controller.cancel(); // 页面卸载或放弃查询
 ```
 
-`route` 接收 2～10 个连续途经点，必须一次提交以保留跨途经点转向历史。仅支持 driving。`radius_m` 默认 1000、范围 (0,10000]；`candidates` 默认 8、范围 1～16。坐标使用 `{lon,lat}`，经度归一化，纬度限定 [-90,90]。距离为米、时长为秒；结果字段与 `routeweft-routing/src/roads.rs` 中 Serialize 类型一致，不伪造 OSRM alternatives、lanes 或其他未实现功能。宿主负责 SearchBudget 和数据集生命周期，不通过前端承诺引擎执行预算。
+`route` 接收 2～10 个连续途经点，必须一次提交以保留跨途经点转向历史。仅支持 driving。`radius_m` 默认 1000、范围 (0,10000]；`candidates` 默认 8、范围 1～16。坐标使用 `{lon,lat}`，经度归一化，纬度限定 [-85,85]。距离为米、时长为秒；结果字段与 `routeweft-routing/src/roads.rs` 中 Serialize 类型一致，不伪造 OSRM alternatives、lanes 或其他未实现功能。宿主负责 SearchBudget 和数据集生命周期，不通过前端承诺引擎执行预算。
 
 `client.route/nearest` 是独立查询，不互相取消，可传 AbortSignal。`controller` 每实例代表一个交互控件，只保留最新请求，旧请求完成返回 `superseded`；即使传输层忽略取消也不会返回可渲染的旧结果。底层 Promise 仍需宿主最终完成/拒绝，取消不能强行终止不配合的传输。拖拽时传第三参数 `{preview:true}`，连续两次 Network/RateLimited 错误后退避 4 秒，后续失败倍增至 30 秒；退避内返回 `skipped`，调用方保留现有路线。拖拽结束用默认调用，始终发起请求。成功清除退避。宿主应将网络/限流错误映射为 `RoutingError`，其他异常原样抛出。
 
@@ -49,19 +59,18 @@ export function createMapRouting(hostRouting: RoutingTransport) {
 
 抽取来源、修改说明和许可见 THIRD_PARTY_NOTICES.md 与 LICENSE.osrm-frontend。
 
-## 发布到私有 npm 仓库
+## 远程发布与版本
 
-在仓库根目录配置 `NPM_REGISTRY_INTERNAL` 和 `NPM_TOKEN_INTERNAL` 后执行：
+版本由本包 package.json 管理。仓库根目录配置 NPM_REGISTRY / NPM_TOKEN 后：
 
 ```sh
 make release-frontend-dry-run
 make release-frontend-publish
 ```
 
-发布当前工作区的包，先测试和重新打包，再上传。配置方法及 Devbox 入口见
-[私有发布说明](../../../docs/private-release.md#前端-npm-包发布)。
+默认验证并按依赖顺序发布 client 和 MapLibre adapter。公共仓库使用显式 `--access public`。配置、版本升级、预发布与失败续发见[发布指南](https://github.com/mengxing2017/routeweft/blob/main/docs/frontend-release.md)。
 
-## 0.2 migration
+## 接口说明
 
 `createRouteClient` accepts a route-only transport; `createRoutingClient` still requires route and nearest. Controllers accept either client's route capability. Coordinates are checked against the Rust engine latitude range [-85, 85].
 
