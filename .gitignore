@@ -12,3 +12,5 @@ __pycache__/
 .private-release.env
 .private-release.env.local
 report
+
+example-dist/

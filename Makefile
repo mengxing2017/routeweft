@@ -8,6 +8,9 @@ check-backend: fmt-check
 	cargo test --manifest-path backend/Cargo.toml --workspace
 
 check-frontend:
+	pnpm --dir frontend/packages/routing-client test
+	pnpm --dir frontend/packages/maplibre build
+	pnpm --dir frontend/packages/maplibre test
 	pnpm --dir frontend typecheck
 	pnpm --dir frontend build
 
