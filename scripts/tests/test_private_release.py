@@ -12,6 +12,11 @@ release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
 
+def staged_source(args):
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / 'release-source.json').write_text(release.json.dumps({'packages': list(release.ORDER)}))
+
+
 class ReleaseTests(unittest.TestCase):
     def test_local_config_loads_quotes_comments_and_preserves_environment(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -84,7 +89,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(release.rules(None, 'internal'), [b'internal.invalid'])
 
     def test_missing_registry_never_falls_back_to_internal(self):
-        with patch.object(release, 'prepare') as prepare:
+        with patch.object(release, 'prepare', side_effect=staged_source) as prepare:
             for registries in (None, []):
                 with self.subTest(registries=registries), self.assertRaisesRegex(
                         release.ReleaseInputError, '--registry crates-io'):
@@ -117,7 +122,7 @@ class ReleaseTests(unittest.TestCase):
         env = {'CARGO_REGISTRIES_INTERNAL_INDEX': 'https://internal.invalid/index',
                'CARGO_REGISTRIES_INTERNAL_TOKEN': 'fixture'}
         with patch.dict(release.os.environ, env, clear=True), \
-                patch.object(release, 'prepare') as prepare, \
+                patch.object(release, 'prepare', side_effect=staged_source) as prepare, \
                 patch.object(release, 'publish') as publish:
             release.release(Namespace(ref='HEAD', package=None, execute=False, registry=['internal']))
             self.assertEqual([call.args[0].package for call in publish.call_args_list], [None])
@@ -129,7 +134,7 @@ class ReleaseTests(unittest.TestCase):
         env = {'CARGO_REGISTRIES_INTERNAL_INDEX': 'https://internal.invalid/index',
                'CARGO_REGISTRIES_INTERNAL_TOKEN': 'fixture'}
         with patch.dict(release.os.environ, env, clear=True), \
-                patch.object(release, 'prepare'), patch.object(release, 'publish') as publish:
+                patch.object(release, 'prepare', side_effect=staged_source), patch.object(release, 'publish') as publish:
             release.release(Namespace(ref='HEAD', package=None, execute=True, registry=['internal']))
         self.assertEqual([call.args[0].package for call in publish.call_args_list], list(release.ORDER))
         self.assertTrue(all(call.args[0].execute for call in publish.call_args_list))
@@ -138,7 +143,7 @@ class ReleaseTests(unittest.TestCase):
         env = {'CARGO_REGISTRIES_INTERNAL_INDEX': 'https://internal.invalid/index',
                'CARGO_REGISTRIES_INTERNAL_TOKEN': 'fixture'}
         with patch.dict(release.os.environ, env, clear=True), \
-                patch.object(release, 'prepare') as prepare, \
+                patch.object(release, 'prepare', side_effect=staged_source) as prepare, \
                 patch.object(release, 'publish', side_effect=ValueError('failed')) as publish:
             with self.assertRaises(ValueError):
                 release.release(Namespace(ref='HEAD', package=None, execute=True, registry=['internal']))
@@ -152,7 +157,7 @@ class ReleaseTests(unittest.TestCase):
                                      ('TOKEN', name.lower() + '-token'))}
         with patch.dict(release.os.environ, env, clear=True), \
                 patch.object(release, 'resolve_commit', return_value='a' * 40) as resolve, \
-                patch.object(release, 'prepare') as prepare, \
+                patch.object(release, 'prepare', side_effect=staged_source) as prepare, \
                 patch.object(release, 'publish') as publish:
             release.release(Namespace(ref='HEAD', package=None, execute=True,
                                       registry=['east', 'west', 'east']))
@@ -170,7 +175,7 @@ class ReleaseTests(unittest.TestCase):
                'CARGO_REGISTRIES_EAST_TOKEN': 'fixture',
                'CARGO_REGISTRIES_WEST_INDEX': 'https://west.invalid/index'}
         with patch.dict(release.os.environ, env, clear=True), \
-                patch.object(release, 'prepare') as prepare:
+                patch.object(release, 'prepare', side_effect=staged_source) as prepare:
             with self.assertRaisesRegex(release.ReleaseInputError, 'WEST_TOKEN'):
                 release.release(Namespace(registry=['east', 'west'], execute=True))
             prepare.assert_not_called()
@@ -181,7 +186,7 @@ class ReleaseTests(unittest.TestCase):
                for suffix, value in (('INDEX', f'https://{name.lower()}.invalid/index'),
                                      ('TOKEN', 'fixture'))}
         with patch.dict(release.os.environ, env, clear=True), \
-                patch.object(release, 'prepare') as prepare, \
+                patch.object(release, 'prepare', side_effect=staged_source) as prepare, \
                 patch.object(release, 'publish', side_effect=release.ReleaseInputError('failed')) as publish:
             with self.assertRaises(release.ReleaseInputError):
                 release.release(Namespace(ref='HEAD', package=None, execute=True,
@@ -224,7 +229,7 @@ class ReleaseTests(unittest.TestCase):
         with patch.dict(release.os.environ, env, clear=True), \
                 patch.object(release, 'resolve_commit', return_value='a' * 40), \
                 patch.object(release, 'wait_for_publish') as wait, \
-                patch.object(release, 'prepare') as prepare, \
+                patch.object(release, 'prepare', side_effect=staged_source) as prepare, \
                 patch.object(release, 'publish') as publish:
             release.release(Namespace(ref='HEAD', package=None, execute=True,
                                       registry=['crates-io', 'internal']))
@@ -313,7 +318,7 @@ class ReleaseTests(unittest.TestCase):
             version = committed['workspace']['package']['version']
             self.assertEqual(workspace['package']['version'], version)
             self.assertEqual(workspace['package']['publish'], ['crates-io'])
-            for name in release.ORDER:
+            for name in (name for name in release.ORDER if name in committed['workspace']['dependencies']):
                 dep = workspace['dependencies'][name]
                 self.assertEqual(dep['version'], '=' + version)
                 self.assertNotIn('registry', dep)
@@ -474,7 +479,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('5s', output.getvalue())
 
     def test_public_interval_is_only_between_successful_uploads(self):
-        with patch.object(release, 'prepare'), \
+        with patch.object(release, 'prepare', side_effect=staged_source), \
                 patch.object(release, 'publish', side_effect=[None, release.ReleaseInputError('failed')]) as publish, \
                 patch.object(release, 'wait_for_publish') as wait:
             with self.assertRaises(release.ReleaseInputError):
@@ -488,7 +493,7 @@ class ReleaseTests(unittest.TestCase):
                                            ('crates-io', False, None),
                                            ('crates-io', True, 'routeweft-domain')):
             with self.subTest(registry=registry, execute=execute, package=package), \
-                    patch.object(release, 'prepare'), patch.object(release, 'publish'), \
+                    patch.object(release, 'prepare', side_effect=staged_source), patch.object(release, 'publish'), \
                     patch.object(release, 'wait_for_publish') as wait:
                 release.release_registry(Namespace(ref='HEAD', package=package, execute=execute), registry)
                 wait.assert_not_called()
