@@ -1538,3 +1538,75 @@ fn quarantine_cli_budget_failure_never_publishes_and_capabilities_remain_explici
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn resource_plan_is_authenticated_budget_independent_and_matches_runtime_rejection() {
+    let root = temp("routeweft-resource-plan");
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("fixture.pbf");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/generate_fixture.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    let (code, version) = command(&["version"]);
+    assert_eq!(code, 0);
+    assert_eq!(version["capabilities"]["resource_plan"]["schema"], 1);
+    for (builder, format) in [("memory", "1"), ("external", "2")] {
+        let dataset = root.join(builder);
+        let (code, built) = command(&[
+            "build",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            dataset.to_str().unwrap(),
+            "--profile",
+            "driving",
+            "--builder",
+            builder,
+            "--format",
+            format,
+        ]);
+        assert_eq!(code, 0, "{built}");
+        let (code, planned) = command(&[
+            "resource-plan",
+            "--dataset",
+            dataset.to_str().unwrap(),
+            "--max-load-bytes",
+            "1",
+        ]);
+        assert_eq!(code, 0, "{planned}");
+        let plan = &planned["resource_plan"];
+        assert_eq!(plan["dataset_id"], built["manifest"]["dataset_id"]);
+        assert_eq!(plan["engine_load"], built["resource_plan"]["engine_load"]);
+        assert_eq!(plan["effective_load_options"]["max_resident_bytes"], 1);
+        let (code, rejected) = command(&[
+            "nearest",
+            "--dataset",
+            dataset.to_str().unwrap(),
+            "--coordinate",
+            "0,0",
+            "--max-load-bytes",
+            "1",
+        ]);
+        assert_eq!(code, 4, "{rejected}");
+        assert_eq!(
+            rejected["error"]["resource"]["observed"],
+            plan["engine_load"]["estimated_bytes"]
+        );
+        assert_eq!(rejected["error"]["resource"]["limit"], 1);
+        assert_eq!(rejected["error"]["resource"]["stage"], "engine_load");
+        assert_eq!(
+            rejected["error"]["resource"]["estimator_version"],
+            plan["estimator_version"]
+        );
+        let file = dataset.join(built["manifest"]["graph_file"].as_str().unwrap());
+        std::fs::write(file, b"tampered").unwrap();
+        let (code, invalid) = command(&["resource-plan", "--dataset", dataset.to_str().unwrap()]);
+        assert_eq!(code, 4, "{invalid}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
