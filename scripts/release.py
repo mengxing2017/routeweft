@@ -21,7 +21,7 @@ import tomllib
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-ORDER = ('routeweft-domain', 'routeweft-dataset', 'routeweft-routing', 'routeweft-preprocess')
+ORDER = ('routeweft-domain', 'routeweft-dataset', 'routeweft-routing', 'routeweft-preprocess', 'routeweft-runtime')
 REPOSITORY = 'https://github.com/mengxing2017/routeweft'
 
 
