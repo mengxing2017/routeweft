@@ -114,3 +114,60 @@ export function createRouteController(client: Pick<RoutingClient, 'route'>, conf
     },
   };
 }
+
+export interface PlannerState {
+  points: readonly (Point | undefined)[];
+  picking: number | null;
+  busy: boolean;
+  route?: RouteResult;
+  error?: unknown;
+}
+/** Framework-independent editor. Every edit invalidates pending results, including errors. */
+export function createRoutePlanner(client: Pick<RoutingClient, 'route'>) {
+  const controller = createRouteController(client);
+  const listeners = new Set<() => void>();
+  let state: PlannerState = { points: [undefined, undefined], picking: null, busy: false };
+  let revision = 0;
+  let disposed = false;
+  const publish = (next: PlannerState) => { if (!disposed) { state = next; listeners.forEach(fn => fn()); } };
+  const invalidate = () => { revision++; controller.cancel(); };
+  const edit = (next: Partial<PlannerState>) => {
+    invalidate(); publish({ ...state, busy: false, route: undefined, error: undefined, ...next });
+  };
+  return {
+    getSnapshot: () => state,
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    pick(index: number | null) {
+      if (index !== null && (!Number.isInteger(index) || index < 0 || index >= state.points.length))
+        throw new RoutingError('InvalidInput', 'Waypoint index out of bounds');
+      publish({ ...state, picking: index });
+    },
+    setPoint(index: number, point: Point) {
+      if (!Number.isInteger(index) || index < 0 || index >= state.points.length)
+        throw new RoutingError('InvalidInput', 'Waypoint index out of bounds');
+      const next = [...state.points]; normalizePoint(point); next[index] = { ...point };
+      edit({ points: next, picking: null });
+    },
+    setPoints(points: readonly (Point | undefined)[]) {
+      if (points.length < 2 || points.length > 10) throw new RoutingError('InvalidInput', 'Route requires 2–10 waypoints');
+      edit({ points: points.map(p => { if (p) normalizePoint(p); return p ? { ...p } : undefined; }), picking: null });
+    },
+    swap() { edit({ points: [...state.points].reverse(), picking: null }); },
+    clear() { edit({ points: [undefined, undefined], picking: null }); },
+    cancel() { edit({ picking: null }); },
+    reportError(error: unknown) { edit({ picking: null, error }); },
+    async calculate(options?: QueryOptions) {
+      if (disposed || state.points.some(p => !p)) return;
+      invalidate(); const id = revision;
+      const points = state.points.filter((p): p is Point => p !== undefined);
+      publish({ ...state, picking: null, busy: true, route: undefined, error: undefined });
+      try {
+        const result = await controller.route(points, options);
+        if (!disposed && revision === id && result.status === 'ok') publish({ ...state, busy: false, route: result.route });
+      } catch (error) {
+        if (!disposed && revision === id) publish({ ...state, busy: false, error });
+      }
+    },
+    dispose() { invalidate(); disposed = true; listeners.clear(); },
+  };
+}
