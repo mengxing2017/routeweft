@@ -1258,6 +1258,223 @@ mod tests {
         fs::remove_dir_all(parent).unwrap();
     }
     #[test]
+    fn quarantine_checks_full_members_beyond_projection_and_repeated_exclusions_are_idempotent() {
+        for unbounded in [false, true] {
+            let parent = temporary();
+            let mut osm = fixture();
+            let mut members = vec![(1, 20, "")];
+            members.extend(std::iter::repeat_n((0, 999, ""), 260));
+            members.push(if unbounded { (2, 999, "") } else { (1, 60, "") });
+            osm.relations
+                .push(relation(5652903, "no_right_turn", &members));
+            let staged = source(&parent, &osm);
+            let policy = InvalidRestrictionPolicy::QuarantineWays;
+            let memory = crate::prepare(
+                &osm,
+                crate::BuildOptions {
+                    invalid_restrictions: policy,
+                    ..Default::default()
+                },
+            );
+            let disk =
+                prepare_with_policy(&staged, &parent.join("ready"), Default::default(), policy);
+            if unbounded {
+                for error in [memory.unwrap_err(), disk.unwrap_err()] {
+                    let blocker = error.report.blockways_failure.as_ref().unwrap();
+                    assert_eq!(blocker.reason, "UnboundedMemberDependency");
+                    assert_eq!(blocker.relation_id, 5652903);
+                    assert!(!blocker.recoverable);
+                    assert!(error.report.restriction_diagnostics[0].members_truncated);
+                    assert!(blocker.members.iter().all(|m| m.kind != "relation"));
+                    assert!(error.report.planned_blocked_way_ids.is_empty());
+                    assert!(error.report.applied_blocked_way_ids.is_empty());
+                    assert!(!error.report.restriction_audit.truncated);
+                }
+                assert!(!parent.join("ready").exists());
+            } else {
+                let (graph, audit) = memory.unwrap();
+                let disk = disk.unwrap();
+                assert_eq!(disk.blocked_way_ids, vec![20, 60]);
+                assert_eq!(graph, self::graph(&parent.join("ready")));
+                assert!(graph
+                    .edges
+                    .iter()
+                    .all(|e| !disk.blocked_way_ids.contains(&e.way)));
+                let source = Source::open(&staged, 4 * 1024 * 1024).unwrap();
+                let mut records = audit.restriction_diagnostics;
+                let mut excluded = BTreeSet::new();
+                for _ in 0..2 {
+                    assert!(exclusions(
+                        &source,
+                        &mut records,
+                        &mut excluded,
+                        Default::default(),
+                        policy
+                    )
+                    .unwrap()
+                    .is_none());
+                    assert_eq!(excluded, BTreeSet::from([20, 60]));
+                }
+            }
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+    #[test]
+    fn quarantine_missing_from_to_ways_only_excludes_present_dependency() {
+        let parent = temporary();
+        let mut osm = fixture();
+        osm.relations.push(relation(
+            5652903,
+            "no_right_turn",
+            &[(1, 999, "from"), (1, 30, "via"), (1, 998, "to")],
+        ));
+        let staged = source(&parent, &osm);
+        let policy = InvalidRestrictionPolicy::QuarantineWays;
+        let (memory, audit) = crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: policy,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let output = parent.join("ready");
+        let disk = prepare_with_policy(&staged, &output, Default::default(), policy).unwrap();
+        assert_eq!(memory, graph(&output));
+        assert_eq!(disk.blocked_way_ids, vec![30]);
+        assert_eq!(audit.planned_blocked_way_ids, vec![30]);
+        assert_eq!(audit.applied_blocked_way_ids, vec![30]);
+        assert!(memory.edges.iter().all(|e| e.way != 30));
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn quarantine_member_budget_uses_full_source_not_projected_member_count() {
+        let parent = temporary();
+        let mut osm = fixture();
+        let members = vec![(1, 20, ""); 65_537];
+        osm.relations
+            .push(relation(5652903, "no_right_turn", &members));
+        let staged = source(&parent, &osm);
+        let policy = InvalidRestrictionPolicy::QuarantineWays;
+        let memory = crate::prepare(
+            &osm,
+            crate::BuildOptions {
+                invalid_restrictions: policy,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let disk = prepare_with_policy(&staged, &parent.join("ready"), Default::default(), policy)
+            .unwrap_err();
+        for error in [&memory, &disk] {
+            assert!(
+                matches!(&error.source, routeweft_dataset::Error::ResourceLimit(r)
+                if r.resource == "blockways_member_references" && r.limit == 65_536 && r.observed == 65_537)
+            );
+            assert!(error.report.restriction_diagnostics[0].members_truncated);
+            assert!(error.report.planned_blocked_way_ids.is_empty());
+            assert!(error.report.applied_blocked_way_ids.is_empty());
+            assert!(!error.report.valid);
+        }
+        assert!(!parent.join("ready").exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn quarantine_budget_failures_keep_plans_unapplied_and_never_publish() {
+        for count_limit in [false, true] {
+            let parent = temporary();
+            let mut osm = fixture();
+            for id in [5652903, 5652904] {
+                osm.relations
+                    .push(relation(id, "no_right_turn", &[(1, 20, ""), (1, 40, "")]));
+            }
+            let staged = source(&parent, &osm);
+            let limits = crate::RestrictionAuditLimits {
+                max_diagnostics: if count_limit { 1 } else { 4096 },
+                max_blockways_attempts: 1,
+                ..Default::default()
+            };
+            let policy = InvalidRestrictionPolicy::QuarantineWays;
+            let memory = crate::prepare(
+                &osm,
+                crate::BuildOptions {
+                    invalid_restrictions: policy,
+                    restriction_audit: limits,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            let disk = prepare_with_policy(
+                &staged,
+                &parent.join("ready"),
+                BlockWaysOptions {
+                    restriction: RestrictionOptions {
+                        audit: limits,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                policy,
+            )
+            .unwrap_err();
+            for error in [&memory, &disk] {
+                assert!(!error.report.valid);
+                assert_eq!(error.report.restriction_audit.attempt, 1);
+                assert_eq!(error.report.restriction_audit.truncated, count_limit);
+                assert_eq!(
+                    error.report.failure_code.as_deref(),
+                    Some(if count_limit {
+                        "RestrictionAuditLimitExceeded"
+                    } else {
+                        "BlockWaysAttemptLimitExceeded"
+                    })
+                );
+                assert!(error.report.planned_blocked_way_ids.is_empty());
+                assert!(error.report.applied_blocked_way_ids.is_empty());
+            }
+            assert_eq!(
+                memory.report.restriction_audit,
+                disk.report.restriction_audit
+            );
+            assert!(!parent.join("ready").exists());
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+    #[test]
+    fn unbounded_dependencies_cannot_be_declared_irrelevant_without_visible_roads() {
+        for policy in [
+            InvalidRestrictionPolicy::BlockWays,
+            InvalidRestrictionPolicy::QuarantineWays,
+        ] {
+            let parent = temporary();
+            let mut osm = fixture();
+            osm.relations
+                .push(relation(5652903, "no_right_turn", &[(2, 999, "via")]));
+            let staged = source(&parent, &osm);
+            let memory = crate::prepare(
+                &osm,
+                crate::BuildOptions {
+                    invalid_restrictions: policy,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            let disk =
+                prepare_with_policy(&staged, &parent.join("ready"), Default::default(), policy)
+                    .unwrap_err();
+            for error in [&memory, &disk] {
+                let blocker = error.report.blockways_failure.as_ref().unwrap();
+                assert_eq!(blocker.relation_id, 5652903);
+                assert_eq!(blocker.attempt, 1);
+                assert_eq!(blocker.reason, "UnboundedMemberDependency");
+                assert!(!blocker.recoverable);
+                assert!(error.report.applied_blocked_way_ids.is_empty());
+            }
+            assert!(!parent.join("ready").exists());
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+    #[test]
     fn quarantine_empty_roles_cascades_only_exits_and_publishes_loss_marker() {
         let parent = temporary();
         let mut osm = fixture();
