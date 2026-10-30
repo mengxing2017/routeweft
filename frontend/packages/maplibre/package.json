@@ -1,0 +1,37 @@
+{
+  "name": "@routeweft/maplibre",
+  "version": "0.1.0",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "prepack": "npm run build",
+    "example": "vite example --host 127.0.0.1",
+    "build:example": "vite build example --outDir ../example-dist"
+  },
+  "peerDependencies": {
+    "maplibre-gl": "^5.0.0"
+  },
+  "dependencies": {
+    "@routeweft/routing-client": "0.2.0",
+    "@types/geojson": "^7946.0.16"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "maplibre-gl": "5.24.0",
+    "vitest": "^3.2.4",
+    "vite": "6.4.3"
+  },
+  "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md"
+}
