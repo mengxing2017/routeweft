@@ -2,15 +2,15 @@ use crate::pbf::Relation;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Explicit opt-in: never infer a missing turn location or ignore a restriction.
+/// Isolate bounded malformed restrictions by default; strict rejection is explicit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvalidRestrictionPolicy {
-    #[default]
     Reject,
     BlockWays,
-    /// Version 1: explicitly quarantine approved malformed relations, including empty roles.
+    /// Version 1: quarantine approved malformed relations, including empty roles.
     /// May lose road coverage; never infer a turn or silently drop its restriction.
+    #[default]
     QuarantineWays,
 }
 #[derive(Clone, Copy, Debug, Default)]
