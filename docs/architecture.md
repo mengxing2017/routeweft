@@ -22,3 +22,9 @@ R-tree 使用数据集纬度范围中点的局部等距圆柱平面；候选段�
 查询不启动线程；宿主提供每次查询的预算、deadline 和 AtomicBool 取消标记，负责线程数与排队。工作计数、状态数、队列和结果几何均有限；硬 RSS 上限由部署环境另行限制。输入按格式及解析器上限拒绝。
 
 持久格式及详细决策见 [ADR 0002](adr-0002-dataset-and-routing.md)、[数据集格式](dataset-format.md)。旧 [ADR 0001](adr-0001-routing-prototype.md) 和 [原型记录](routing-prototype.md) 是历史阶段说明，不是当前公共 API。
+
+## Optional host runtime
+
+`routeweft-runtime` depends on the synchronous dataset/routing crates and Tokio. Neither synchronous crate depends on Tokio. Hosts configure concurrency, queue limits, capacity and budgets, authorize dataset paths, and inject resource keepalive guards. See `backend/crates/routeweft-runtime/README.md` for cancellation, quota and fresh validation semantics.
+
+The frontend routing client owns request coordination and planner state; the optional `@routeweft/maplibre` package owns route overlays and markers. Host authentication, UI and publication context remain outside both packages.
