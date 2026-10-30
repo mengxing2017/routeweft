@@ -18,7 +18,7 @@ test('route and nearest use backend fields, defaults and copied normalized coord
   assert.equal(await client.route(points), result);
   assert.deepEqual(await client.nearest(points[0]), []);
   assert.equal(points[0].lon, 361);
-  assert.equal(normalizePoint({ lon: 180, lat: 90 }).lon, 180);
+  assert.equal(normalizePoint({ lon: 180, lat: 85 }).lon, 180);
 });
 test('reject unsupported or invalid queries before transport', async () => {
   let calls = 0;

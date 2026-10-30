@@ -36,8 +36,8 @@ export class RoutingError extends Error {
 }
 /** Wrap map world copies, retaining already valid coordinates (including +180). */
 export function normalizePoint(point: Point): Point {
-  if (!Number.isFinite(point.lon) || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90)
-    throw new RoutingError('InvalidInput', 'Coordinates must be finite and latitude within [-90, 90]');
+  if (!Number.isFinite(point.lon) || !Number.isFinite(point.lat) || Math.abs(point.lat) > 85)
+    throw new RoutingError('InvalidInput', 'Coordinates must be finite and latitude within [-85, 85]');
   return { lon: point.lon >= -180 && point.lon <= 180 ? point.lon :
     ((point.lon % 360 + 540) % 360) - 180, lat: point.lat };
 }
