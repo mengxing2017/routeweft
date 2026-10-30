@@ -1,4 +1,9 @@
 //! Versioned, bounded, immutable routing dataset. No process-global resources.
+mod resources;
+pub use resources::{
+    estimate_resident, resource_plan, resource_plan_from_manifest, AllocationEstimate, PlanCounts,
+    ResourcePlan, ESTIMATOR_VERSION,
+};
 mod identity;
 pub use identity::{is_digest, DatasetIdentity};
 mod adjacency;
@@ -30,6 +35,8 @@ pub struct ResourceLimit {
     pub limit: u64,
     pub observed: u64,
     pub stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimator_version: Option<u32>,
 }
 pub fn resource_limit(resource: &str, limit: u64, observed: u64, stage: &str) -> Error {
     Error::ResourceLimit(ResourceLimit {
@@ -37,6 +44,7 @@ pub fn resource_limit(resource: &str, limit: u64, observed: u64, stage: &str) ->
         limit,
         observed,
         stage: stage.into(),
+        estimator_version: (resource == "estimated_resident_bytes").then_some(ESTIMATOR_VERSION),
     })
 }
 impl std::fmt::Display for Error {
@@ -153,7 +161,7 @@ impl GraphCapacity {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct LoadOptions {
     pub max_bytes: u64,
     pub max_nodes: usize,
