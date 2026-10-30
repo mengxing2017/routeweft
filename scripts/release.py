@@ -274,13 +274,14 @@ def prepare(args):
     manifest = destination / 'backend/Cargo.toml'
     text = manifest.read_text()
     metadata = tomllib.loads(text)
+    order = tuple(name for name in ORDER if name in metadata['workspace']['dependencies'])
     version = metadata['workspace']['package']['version']
     if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version):
         raise ValueError('unsupported release version')
     if text.count('publish = false') != 1:
         raise ValueError('workspace publish protection changed; review transformation')
     text = text.replace('publish = false', f'publish = ["{registry}"]\nrepository = "{REPOSITORY}"')
-    for name in ORDER:
+    for name in order:
         original = metadata['workspace']['dependencies'][name]
         expected = f'{name} = {{ path = "{original["path"]}" }}'
         registry_field = '' if registry == 'crates-io' else f', registry = "{registry}"'
@@ -289,7 +290,7 @@ def prepare(args):
             raise ValueError(f'dependency layout changed: {name}')
         text = text.replace(expected, replacement)
     manifest.write_text(text)
-    for name in (*ORDER, 'routeweft-daemon'):
+    for name in (*order, 'routeweft-daemon'):
         crate = destination / 'backend/crates' / name
         manifest = crate / 'Cargo.toml'
         text = manifest.read_text()
@@ -313,7 +314,7 @@ def prepare(args):
     # Lockfile may contain registry URLs after Cargo resolves internal dependencies.
     # Keep the entire staging directory private, including logs and archives.
     (destination / 'release-source.json').write_text(json.dumps({
-        'commit': commit, 'version': version, 'packages': list(ORDER),
+        'commit': commit, 'version': version, 'packages': list(order),
         'registry': registry,
     }, indent=2) + '\n')
     scan_tree(destination, patterns)
@@ -412,17 +413,20 @@ def publish(args):
         raise ValueError('release staging must be outside the source repository')
     source = json.loads((stage / 'release-source.json').read_text())
     registry = registry_name(args)
-    if source['packages'] != list(ORDER) or source['registry'] != registry:
+    order = tuple(name for name in ORDER if name in source['packages'])
+    if source['packages'] != list(order) or not order or source['registry'] != registry:
         raise ValueError('unexpected release staging metadata')
     index = registry_index(registry)
     require_token(registry)
     patterns = rules(args.patterns, registry)
     # Do not scan a resolved Cargo.lock: it intentionally contains private index data.
-    for name in ORDER:
+    for name in order:
         scan_tree(stage / 'backend/crates' / name, patterns)
     # Run one package at a time. Caller waits for index visibility before proceeding.
     if args.package is None and args.execute:
         raise ReleaseInputError('整组入口只用于预演；正式上传必须逐包执行。')
+    if args.package and args.package not in order:
+        raise ReleaseInputError('所选历史版本不包含该包。')
     selection = ['-p', args.package] if args.package else ['--workspace']
     command = ['cargo', 'publish', '--registry', registry, *selection]
     env = os.environ.copy()
@@ -430,7 +434,7 @@ def publish(args):
     env[registry_variable(registry, 'CREDENTIAL_PROVIDER')] = 'cargo:token'
     # Capture Cargo output: errors may contain the private URL or credentials.
     run_cargo([*command, '--dry-run'], stage / 'backend', env)
-    for package in ([args.package] if args.package else ORDER):
+    for package in ([args.package] if args.package else order):
         archive = package_archive(stage / 'backend', package, source['version'])
         scan_archive(archive, patterns, private_index=index)
     if args.execute:
@@ -468,7 +472,8 @@ def release_registry(args, registry):
             publish(argparse.Namespace(stage=stage, patterns=getattr(args, 'patterns', None), package=None,
                                        execute=False, registry=registry))
             return
-        for position, package in enumerate([args.package] if args.package else ORDER):
+        source = json.loads((stage / 'release-source.json').read_text())
+        for position, package in enumerate([args.package] if args.package else source['packages']):
             if position and args.execute and registry == 'crates-io':
                 wait_for_publish(getattr(args, 'publish_interval', 60), 'crates.io 包间发布间隔')
             print(f'{package}: {"publish" if args.execute else "dry-run"}', flush=True)
