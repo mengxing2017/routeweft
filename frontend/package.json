@@ -1,6 +1,6 @@
 {
   "name": "@routeweft/frontend",
-  "version": "0.1.0",
+  "version": "0.1.0-pre",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.22.0",

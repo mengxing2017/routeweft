@@ -1,6 +1,6 @@
 {
   "name": "@routeweft/maplibre",
-  "version": "0.1.0",
+  "version": "0.1.0-pre",
   "type": "module",
   "files": [
     "dist",
@@ -24,7 +24,7 @@
     "maplibre-gl": "^5.0.0"
   },
   "dependencies": {
-    "@routeweft/routing-client": "0.2.0",
+    "@routeweft/routing-client": "0.1.0-pre",
     "@types/geojson": "^7946.0.16"
   },
   "devDependencies": {
@@ -33,5 +33,16 @@
     "vitest": "^3.2.4",
     "vite": "6.4.3"
   },
-  "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md"
+  "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mengxing2017/routeweft.git",
+    "directory": "frontend/packages/maplibre"
+  },
+  "homepage": "https://github.com/mengxing2017/routeweft/tree/main/frontend/packages/maplibre#readme",
+  "bugs": {
+    "url": "https://github.com/mengxing2017/routeweft/issues"
+  },
+  "description": "MapLibre GL JS adapter for RouteWeft route layers and waypoint interaction",
+  "types": "./dist/index.d.ts"
 }

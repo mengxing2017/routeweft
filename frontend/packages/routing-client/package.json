@@ -1,6 +1,6 @@
 {
   "name": "@routeweft/routing-client",
-  "version": "0.2.0",
+  "version": "0.1.0-pre",
   "description": "Framework-independent RouteWeft routing interfaces and request coordination",
   "type": "module",
   "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md",
@@ -24,5 +24,14 @@
   },
   "devDependencies": {
     "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mengxing2017/routeweft.git",
+    "directory": "frontend/packages/routing-client"
+  },
+  "homepage": "https://github.com/mengxing2017/routeweft/tree/main/frontend/packages/routing-client#readme",
+  "bugs": {
+    "url": "https://github.com/mengxing2017/routeweft/issues"
   }
 }
