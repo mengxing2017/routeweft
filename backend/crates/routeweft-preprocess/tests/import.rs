@@ -209,7 +209,7 @@ fn malformed_relation_diagnostics_and_explicit_conservative_blocking() {
     rel.id = 6843783; // Same malformed member shape as the real input, synthetic geometry.
     rel.members.retain(|m| m.role != "via");
     osm.relations.push(rel);
-    let error = graph(&osm).unwrap_err();
+    let error = strict_prepare(&osm).unwrap_err();
     let d = &error.report.restriction_diagnostics[0];
     assert_eq!(
         (d.relation_id, d.code.as_str(), d.action.as_str()),
@@ -268,7 +268,7 @@ fn missing_references_invalid_shapes_and_multiplicity_are_distinct() {
             }
         }
         osm.relations.push(r);
-        let err = graph(&osm).unwrap_err();
+        let err = strict_prepare(&osm).unwrap_err();
         assert_eq!(err.report.restriction_diagnostics[0].code, code);
     }
     // A from/to member omitted from an extract must not be mistaken for a
@@ -278,7 +278,17 @@ fn missing_references_invalid_shapes_and_multiplicity_are_distinct() {
     r.members[0].id = 999;
     osm.relations.push(r);
     assert_eq!(
-        graph(&osm).unwrap_err().report.restriction_diagnostics[0].code,
+        routeweft_preprocess::prepare(
+            &osm,
+            routeweft_preprocess::BuildOptions {
+                invalid_restrictions: routeweft_preprocess::InvalidRestrictionPolicy::Reject,
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .report
+        .restriction_diagnostics[0]
+            .code,
         "MissingReference"
     );
 }
@@ -410,7 +420,7 @@ fn conservative_blocking_rechecks_dependent_restrictions() {
 fn preprocessor_rejects_extent_unusable_by_the_city_query_engine() {
     let mut osm = network();
     osm.nodes.get_mut(&1).unwrap().point.lon = 10.;
-    let err = graph(&osm).unwrap_err();
+    let err = strict_prepare(&osm).unwrap_err();
     assert!(err.to_string().contains("unsupported geographic extent"));
 }
 
@@ -441,7 +451,7 @@ fn multi_entry_via_way_and_expansion_limits_do_not_drop_restrictions() {
         });
     }
     osm.relations.push(r);
-    let error = graph(&osm).unwrap_err();
+    let error = strict_prepare(&osm).unwrap_err();
     assert_eq!(
         error.report.restriction_diagnostics[0].code,
         "RestrictionLimitExceeded"
@@ -459,7 +469,7 @@ fn excluding_the_only_allowed_exit_never_opens_other_turns() {
         .tags
         .insert("access".into(), "no".into());
     osm.relations.push(relation("only_right_turn", true));
-    let error = graph(&osm).unwrap_err();
+    let error = strict_prepare(&osm).unwrap_err();
     assert_eq!(
         error.report.restriction_diagnostics[0].code,
         "UnresolvedRestriction"
@@ -500,4 +510,40 @@ fn compact_node_lookup_preserves_signed_sparse_ids_and_via_node_rules() {
         }
     }
     assert_eq!(graph(&osm).unwrap(), expected);
+}
+
+#[test]
+fn default_policy_isolates_empty_roles_and_keeps_other_roads() {
+    use routeweft_preprocess::{prepare, BuildOptions, InvalidRestrictionPolicy};
+    let mut osm = network();
+    let mut restriction = relation("no_right_turn", true);
+    for member in &mut restriction.members {
+        member.role.clear();
+    }
+    osm.relations.push(restriction);
+    assert_eq!(
+        BuildOptions::default().invalid_restrictions,
+        InvalidRestrictionPolicy::QuarantineWays
+    );
+    let (graph, report) = prepare(&osm, BuildOptions::default()).unwrap();
+    assert!(report.valid);
+    assert!(!report.restriction_diagnostics.is_empty());
+    assert!(!report.blocked_way_ids.is_empty());
+    assert!(!graph.edges.is_empty());
+    assert!(graph
+        .edges
+        .iter()
+        .all(|edge| !report.blocked_way_ids.contains(&edge.way)));
+}
+
+fn strict_prepare(
+    osm: &Osm,
+) -> routeweft_preprocess::Result<(routeweft_dataset::Graph, routeweft_preprocess::InputReport)> {
+    routeweft_preprocess::prepare(
+        osm,
+        routeweft_preprocess::BuildOptions {
+            invalid_restrictions: routeweft_preprocess::InvalidRestrictionPolicy::Reject,
+            ..Default::default()
+        },
+    )
 }
