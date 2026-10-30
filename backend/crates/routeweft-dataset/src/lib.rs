@@ -422,6 +422,11 @@ pub fn inspect_manifest(path: &Path, limits: LoadOptions) -> Result<Manifest> {
     for (resource, observed, limit) in [
         ("graph_bytes", manifest.graph_bytes, limits.max_bytes),
         (
+            "graph_restrictions",
+            manifest.restrictions as u64,
+            limits.max_restriction_edges as u64,
+        ),
+        (
             "graph_nodes",
             manifest.nodes as u64,
             limits.max_nodes as u64,
