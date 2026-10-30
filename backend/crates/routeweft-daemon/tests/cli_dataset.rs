@@ -50,7 +50,15 @@ fn invalid_maxspeed_requires_opt_in_and_matches_both_builders() {
         .unwrap()
         .success());
     let source = input.to_str().unwrap();
-    let (code, strict) = command(&["preflight", "--input", source, "--profile", "driving"]);
+    let (code, strict) = command(&[
+        "preflight",
+        "--input",
+        source,
+        "--profile",
+        "driving",
+        "--invalid-restrictions",
+        "reject",
+    ]);
     assert_eq!(code, 4, "{strict}");
     assert_eq!(
         strict["error"]["details"]["failure_code"],
@@ -400,6 +408,8 @@ fn preflight_reports_real_relation_identity_without_publishing_a_dataset() {
         for cmd in ["build", "preflight"] {
             let mut args = vec![
                 cmd,
+                "--invalid-restrictions",
+                "reject",
                 "--input",
                 input.to_str().unwrap(),
                 "--profile",
@@ -881,6 +891,8 @@ fn external_cli_validates_options_and_reports_budget_deadline_and_restrictions()
         .success());
     let base = vec![
         "build",
+        "--invalid-restrictions",
+        "reject",
         "--input",
         input.to_str().unwrap(),
         "--output",
@@ -1067,6 +1079,8 @@ fn audit_cli_options_fail_early_and_preserve_structured_errors() {
         "/does-not-exist.pbf",
         "--max-blockways-attempts",
         "2",
+        "--invalid-restrictions",
+        "reject",
     ]);
     assert_eq!(code, 2, "{value}");
     let root = temp("routeweft-audit");
@@ -1267,13 +1281,30 @@ fn empty_role_policy_contract_builds_verifies_and_has_zero_exclusion_residue() {
         .success());
     let source = input.to_str().unwrap();
     let source_sha = routeweft_dataset::hash_file(&input).unwrap();
-    let (code, strict) = command(&["preflight", "--input", source, "--profile", "driving"]);
+    let (code, strict) = command(&[
+        "preflight",
+        "--input",
+        source,
+        "--profile",
+        "driving",
+        "--invalid-restrictions",
+        "reject",
+    ]);
     assert_eq!(code, 4, "{strict}");
     assert_eq!(strict["error"]["details"]["policy"], "reject");
+    let (code, default_preflight) =
+        command(&["preflight", "--input", source, "--profile", "driving"]);
+    assert_eq!(code, 0, "{default_preflight}");
+    assert_eq!(default_preflight["report"]["policy"], "quarantine_ways");
+    assert_eq!(
+        default_preflight["report"]["blocked_way_ids"],
+        serde_json::json!([10, 20])
+    );
+
     for (builder, format) in [("memory", "1"), ("external", "2")] {
-        for policy in ["block_ways", "quarantine_ways"] {
+        for policy in ["block_ways", "quarantine_ways", "default"] {
             let output = root.join(format!("{builder}-{policy}"));
-            let (code, response) = command(&[
+            let mut args = vec![
                 "build",
                 "--input",
                 source,
@@ -1285,9 +1316,16 @@ fn empty_role_policy_contract_builds_verifies_and_has_zero_exclusion_residue() {
                 builder,
                 "--format",
                 format,
-                "--invalid-restrictions",
-                policy,
-            ]);
+            ];
+            if policy != "default" {
+                args.extend(["--invalid-restrictions", policy]);
+            }
+            let (code, response) = command(&args);
+            let policy = if policy == "default" {
+                "quarantine_ways"
+            } else {
+                policy
+            };
             if policy == "block_ways" {
                 assert_eq!(code, 4, "{response}");
                 assert_eq!(response["schema"], 1);
