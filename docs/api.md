@@ -47,3 +47,24 @@ InputReport 是构建审计，不是可传给查询引擎的路由图。保存�
 `InputReport.restriction_audit: RestrictionAuditSummary` 提供实际限额、扫描完整性、观察数/保留数和保守计费；`RestrictionDiagnostic.attempt` 记录轮次。观测计数不是唯一关系总数，提前停止时仅为下界。原 JSON schema=1 和原字段保留，新字段为增量；Rust 结构体字面量需要增加字段或采用 Default。这次 API 增量随新的预发布版本发布，不复用已上传版本。
 
 独立 publication 读取器支持 BlockWays v1/v2 中间 manifest，v2 固定硬边界不相信文件自报的较大限额；最终 dataset graph 格式不变。审计逻辑内存预算不是 RSS，错误仍需匹配 resource 与完整性标记，不能因为 restriction_diagnostics 非空就忽略资源失败。
+
+## 可选 Tokio 宿主层
+
+`routeweft-runtime` 不依赖 daemon。宿主先授权并解析不可变目录，再传入期望身份和配额配置：
+
+```rust,ignore
+use routeweft_dataset::DatasetIdentity;
+use routeweft_runtime::{EngineLoader, Runtime, RuntimeConfig};
+use routeweft_routing::QueryOptions;
+use std::{sync::Arc, time::{Duration, Instant}};
+
+let runtime = Runtime::new(Arc::new(EngineLoader), RuntimeConfig::default());
+let deadline = Instant::now() + Duration::from_secs(10);
+let expected = DatasetIdentity::from(&trusted_manifest);
+let engine = runtime.load(dataset_path, expected, deadline).await?;
+let route = runtime.route(engine, coordinates, QueryOptions::default(), deadline).await?;
+```
+
+默认加载采用 city 档位，区域宿主需配置 `RuntimeConfig.load.capacity` 与对应预算。`DatasetIdentity::verify` 只负责期望身份与 manifest 的完整比对，图结构与摘要校验仍由 dataset/Engine 的加载 API 完成。runtime 的真实配额保持、文件保活和准备校验语义见 `backend/crates/routeweft-runtime/README.md`。
+
+本次 runtime 提取已使用 Rust 1.85.0、`--locked --offline` 验证 dataset/routing/runtime 的编译与测试；workspace 继续声明 edition 2021、Rust 1.85。宿主可使用更高版本工具链。
