@@ -51,10 +51,12 @@ release-publish: release-target-check
 release-test:
 	python3 -m unittest discover -s scripts/tests -v
 
+FRONTEND_RELEASE_ARGS ?=
+
 .PHONY: release-frontend-dry-run release-frontend-publish
 
 release-frontend-dry-run:
-	python3 scripts/frontend-release.py
+	python3 scripts/frontend-release.py $(FRONTEND_RELEASE_ARGS)
 
 release-frontend-publish:
-	python3 scripts/frontend-release.py --execute
+	python3 scripts/frontend-release.py $(FRONTEND_RELEASE_ARGS) --execute
