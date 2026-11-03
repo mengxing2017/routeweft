@@ -1554,7 +1554,7 @@ fn resource_plan_is_authenticated_budget_independent_and_matches_runtime_rejecti
         .success());
     let (code, version) = command(&["version"]);
     assert_eq!(code, 0);
-    assert_eq!(version["capabilities"]["resource_plan"]["schema"], 1);
+    assert_eq!(version["capabilities"]["resource_plan"]["schema"], 2);
     for (builder, format) in [("memory", "1"), ("external", "2")] {
         let dataset = root.join(builder);
         let (code, built) = command(&[
@@ -1601,7 +1601,7 @@ fn resource_plan_is_authenticated_budget_independent_and_matches_runtime_rejecti
         assert_eq!(rejected["error"]["resource"]["stage"], "engine_load");
         assert_eq!(
             rejected["error"]["resource"]["estimator_version"],
-            plan["estimator_version"]
+            plan["base_estimator_version"]
         );
         let file = dataset.join(built["manifest"]["graph_file"].as_str().unwrap());
         std::fs::write(file, b"tampered").unwrap();

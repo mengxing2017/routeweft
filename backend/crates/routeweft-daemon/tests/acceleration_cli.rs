@@ -384,3 +384,115 @@ fn restriction_product_metric_roundtrip_and_old_accelerator_requires_recustomiza
         .is_some());
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn customization_receipt_rejects_changed_parameters_and_changed_accelerator_state() {
+    let path = fixture();
+    let dataset = path.to_str().unwrap();
+    let flags = [
+        "--dataset",
+        dataset,
+        "--leaf-nodes",
+        "64",
+        "--fanout",
+        "4",
+        "--levels",
+        "2",
+    ];
+    let mut args = vec!["resource-plan"];
+    args.extend(flags);
+    let (code, planned) = run(&args);
+    assert_eq!(code, 0, "{planned}");
+    assert_eq!(planned["resource_plan"]["schema"], 2);
+    assert_eq!(planned["resource_plan"]["customization"]["leaf_nodes"], 64);
+    let receipt = path.join("resource-plan.json");
+    std::fs::write(&receipt, serde_json::to_vec(&planned).unwrap()).unwrap();
+    let mut args = vec!["customize"];
+    args.extend(flags);
+    args.extend(["--resource-plan", receipt.to_str().unwrap()]);
+    let mut wrong = args.clone();
+    let index = wrong.iter().position(|v| *v == "--leaf-nodes").unwrap() + 1;
+    wrong[index] = "32";
+    let (code, rejected) = run(&wrong);
+    assert_eq!(code, 2, "{rejected}");
+    assert!(!path.join(FILE_NAME).exists());
+    let (code, customized) = run(&args);
+    assert_eq!(code, 0, "{customized}");
+    let original = std::fs::read(path.join(FILE_NAME)).unwrap();
+    let (code, rejected) = run(&args);
+    assert_eq!(code, 2, "{rejected}");
+    assert_eq!(std::fs::read(path.join(FILE_NAME)).unwrap(), original);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn generated_cross_edge_samples_feed_real_resident_acceptance_and_report_shortfalls() {
+    let path = fixture();
+    let dataset = path.to_str().unwrap();
+    let (code, samples) = run(&[
+        "sample-routes",
+        "--dataset",
+        dataset,
+        "--distance-bands-m",
+        "none",
+        "--count",
+        "3",
+        "--waypoints",
+        "3",
+    ]);
+    assert_eq!(code, 0, "{samples}");
+    assert_eq!(samples["sampling"]["coverage_complete"], true);
+    for sample in samples["sampling"]["samples"].as_array().unwrap() {
+        assert!(sample["witness_edges"].as_array().unwrap().len() >= 2);
+        assert_eq!(sample["coordinates"].as_array().unwrap().len(), 3);
+    }
+    let pairs = path.join("samples.json");
+    std::fs::write(&pairs, serde_json::to_vec(&samples).unwrap()).unwrap();
+    let (code, insufficient) = run(&["sample-routes", "--dataset", dataset, "--max-work", "0"]);
+    assert_eq!(code, 3, "{insufficient}");
+    assert_eq!(insufficient["sampling"]["coverage_complete"], false);
+    assert!(insufficient["sampling"]["shortfall_reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("work")));
+    acceleration::customize(&path, Default::default(), Default::default()).unwrap();
+    let output = path.join("acceptance");
+    let benchmark =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/benchmark-routing.py");
+    let result = Command::new("python3")
+        .arg(benchmark)
+        .args([
+            "--binary",
+            env!("CARGO_BIN_EXE_routeweft"),
+            "--dataset",
+            dataset,
+            "--pairs",
+            pairs.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--mode",
+            "acceptance",
+            "--require-mld",
+            "--require-reachable",
+            "--warmup",
+            "1",
+            "--repeat",
+            "1",
+            "--max-p95-ms",
+            "10000",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["acceptance_passed"], true);
+    assert_eq!(summary["compared"], 3);
+    assert_eq!(summary["auto"]["algorithms"], json!(["mld"]));
+    std::fs::remove_dir_all(path).unwrap();
+}
