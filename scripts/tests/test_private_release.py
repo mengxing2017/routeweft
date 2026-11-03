@@ -25,6 +25,8 @@ class ReleaseTests(unittest.TestCase):
                 "# local configuration\n\n"
                 "export CARGO_REGISTRIES_INTERNAL_INDEX='https://private.invalid/index' # index\n"
                 'CARGO_REGISTRIES_INTERNAL_TOKEN="token with spaces # literal"\n'
+                "NPM_INSTALL_REGISTRY='https://read.invalid/group/'\n"
+                "NPM_INSTALL_TOKEN='read-token'\n"
                 "CARGO_REGISTRY_TOKEN='file-token'\n")
             with patch.object(release, 'ROOT', root), patch.dict(
                     release.os.environ, {'CARGO_REGISTRY_TOKEN': 'exported-token'}, clear=True):
@@ -33,6 +35,8 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(release.os.environ['CARGO_REGISTRIES_INTERNAL_TOKEN'],
                                  'token with spaces # literal')
                 self.assertEqual(release.os.environ['CARGO_REGISTRY_TOKEN'], 'exported-token')
+                self.assertEqual(release.os.environ['NPM_INSTALL_REGISTRY'], 'https://read.invalid/group/')
+                self.assertEqual(release.os.environ['NPM_INSTALL_TOKEN'], 'read-token')
 
     def test_config_is_not_executed_or_expanded(self):
         with tempfile.TemporaryDirectory() as directory:

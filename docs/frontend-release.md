@@ -20,9 +20,16 @@ NPM_REGISTRY='https://packages.example.com/repository/npm-hosted/'
 NPM_TOKEN='填入目标仓库发布token'
 ```
 
-配置文件已被 Git 忽略。也可用 CI secret/导出环境变量，环境值优先；兼容旧变量 `NPM_REGISTRY_INTERNAL`、`NPM_TOKEN_INTERNAL`。新变量优先于旧变量；显式设置空的 `NPM_TOKEN` 会禁用旧 token 回退。显式 `--registry` 优先于环境地址。未指定目标会失败，不会默认上传到 npmjs。dry-run 不强制 token，但私有仓库下载依赖可能仍需读权限。
+配置文件已被 Git 忽略。也可用 CI secret/导出环境变量，环境值优先；兼容旧变量 `NPM_REGISTRY_INTERNAL`、`NPM_TOKEN_INTERNAL`。新变量优先于旧变量；显式设置空的 `NPM_TOKEN` 会禁用旧 token 回退。显式 `--registry` 优先于环境地址。未指定发布目标会失败，不会默认上传到 npmjs。dry-run 不强制发布 token。
 
-脚本将 token 绑定到目标 registry 的 host/path，临时配置权限为 0600，不改用户 `.npmrc`。目标须能提供构建依赖，或允许访问锁文件引用的公共依赖。若仓库只负责 hosted 上传、不代理 npmjs 依赖，应先在可访问构建依赖的环境配置镜像/锁文件；不能通过修改已打包产物绕过校验。
+**构建依赖安装源与发布目标独立。** 默认从 `https://registry.npmjs.org/` 安装公共依赖，发布仍使用 `NPM_REGISTRY`（例如仅负责上传的 npm-hosted）。现有 hosted 配置无需修改。需要内网 npm group/proxy 时，在同一文件中添加：
+
+```dotenv
+NPM_INSTALL_REGISTRY='https://packages.example.com/repository/npm-group/'
+NPM_INSTALL_TOKEN='仅下载源需要认证时填写读权限token，否则留空'
+```
+
+也可用 `--install-registry URL` 覆盖安装地址；优先级为 CLI、NPM_INSTALL_REGISTRY、npmjs。安装和构建/测试使用独立的临时 npmrc，发布 token 不传给这些命令；下载源只使用独立的 NPM_INSTALL_TOKEN，不复用发布 token，即使两个地址相同。打包/预演/上传使用发布配置，上传命令显式绑定发布目标。两份配置均为 0600，认证限定 host/path，临时文件仅引用环境变量，不写入令牌值，不改用户 `.npmrc`。冻结锁文件中的显式 tarball URL 仍按锁文件解析。
 
 ## 私有发布
 

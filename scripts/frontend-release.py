@@ -28,7 +28,7 @@ def load_release_env():
     module.load_release_env()
 
 
-def registry_config(registry, token, require_token=True):
+def registry_config(registry, token, require_token=True, token_variable='ROUTEWEFT_NPM_TOKEN'):
     url = urlsplit(registry)
     if (url.scheme != 'https' or not url.hostname or url.username or url.password
             or url.query or url.fragment or any(c.isspace() for c in registry)
@@ -40,7 +40,7 @@ def registry_config(registry, token, require_token=True):
     auth_path = '//' + url.netloc + url.path.rstrip('/') + '/'
     config = f'registry={registry}\n@routeweft:registry={registry}\n'
     if token:
-        config += f'{auth_path}:_authToken=${{ROUTEWEFT_NPM_TOKEN}}\n'
+        config += f'{auth_path}:_authToken=${{{token_variable}}}\n'
     return registry, config
 
 
@@ -96,11 +96,18 @@ def validate_archive(archive, expected):
             raise ValueError('routing-client archive is missing its upstream license')
 
 
-def release(execute=False, registry=None, packages=None, access='restricted', tag=None):
+def release(execute=False, registry=None, packages=None, access='restricted', tag=None,
+            install_registry=None):
     load_release_env()
     registry, config = registry_config(
         registry or os.environ.get('NPM_REGISTRY') or os.environ.get('NPM_REGISTRY_INTERNAL', ''),
         os.environ.get('NPM_TOKEN', os.environ.get('NPM_TOKEN_INTERNAL', '')), require_token=execute)
+    # A hosted upload repository need not proxy public build dependencies.
+    # Installation has its own config and credentials, even when URLs coincide.
+    _, install_config = registry_config(
+        install_registry or os.environ.get('NPM_INSTALL_REGISTRY') or 'https://registry.npmjs.org/',
+        os.environ.get('NPM_INSTALL_TOKEN', ''), require_token=False,
+        token_variable='ROUTEWEFT_NPM_INSTALL_TOKEN')
     metadata = package_metadata(FRONTEND)
     selected = tuple(p for p in PACKAGES if not packages or p in packages)
     if not selected or (packages and set(packages) - set(PACKAGES)):
@@ -119,18 +126,25 @@ def release(execute=False, registry=None, packages=None, access='restricted', ta
         npmrc = stage / 'npmrc'
         npmrc.write_text(config)
         npmrc.chmod(0o600)
+        install_npmrc = stage / 'install-npmrc'
+        install_npmrc.write_text(install_config)
+        install_npmrc.chmod(0o600)
         env = {key: value for key, value in os.environ.items()
                if not key.lower().startswith('npm_config_')}
         env.update(NPM_CONFIG_USERCONFIG=str(npmrc), NPM_CONFIG_CACHE=str(stage / 'cache'),
                    ROUTEWEFT_NPM_TOKEN=os.environ.get('NPM_TOKEN', os.environ.get('NPM_TOKEN_INTERNAL', '')))
+        install_env = {key: value for key, value in env.items()
+                       if key not in ('NPM_TOKEN', 'NPM_TOKEN_INTERNAL', 'ROUTEWEFT_NPM_TOKEN')}
+        install_env.update(NPM_CONFIG_USERCONFIG=str(install_npmrc),
+                           ROUTEWEFT_NPM_INSTALL_TOKEN=os.environ.get('NPM_INSTALL_TOKEN', ''))
         print('Installing locked workspace dependencies...', flush=True)
-        run(['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts'], frontend, env)
+        run(['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts'], frontend, install_env)
         # Build the client before testing the adapter that imports its generated exports.
         for package in PACKAGES:
             directory = frontend / 'packages' / package
             print(f'Testing @routeweft/{package}@{metadata[package]["version"]}...', flush=True)
-            run(['pnpm', 'run', 'build'], directory, env)
-            run(['pnpm', 'test'], directory, env)
+            run(['pnpm', 'run', 'build'], directory, install_env)
+            run(['pnpm', 'test'], directory, install_env)
         commands = []
         for package in selected:
             directory = frontend / 'packages' / package
@@ -160,12 +174,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute', action='store_true', help='upload after checks; default is dry-run')
     parser.add_argument('--registry', help='explicit HTTPS npm registry; otherwise NPM_REGISTRY')
+    parser.add_argument('--install-registry', help='dependency registry; otherwise NPM_INSTALL_REGISTRY or npmjs')
     parser.add_argument('--package', action='append', choices=PACKAGES, dest='packages', help='select packages; default: both in dependency order')
     parser.add_argument('--access', choices=('public', 'restricted'), default='restricted')
     parser.add_argument('--tag', help='default: latest for stable versions, next for prereleases')
     args = parser.parse_args()
     try:
-        release(args.execute, args.registry, args.packages, args.access, args.tag)
+        release(args.execute, args.registry, args.packages, args.access, args.tag, args.install_registry)
     except (ValueError, OSError, KeyError, IndexError, tarfile.TarError) as error:
         parser.exit(1, f'Frontend release failed: {error}\n')
 

@@ -68,7 +68,16 @@ class FrontendReleaseTests(unittest.TestCase):
                     configs.append(config)
                     self.assertEqual(config.stat().st_mode & 0o777, 0o600)
                     self.assertNotIn('npm_config_registry', env)
-                    self.assertEqual(env['ROUTEWEFT_NPM_TOKEN'], 'secret')
+                    content = config.read_text()
+                    if command[0] == 'pnpm':
+                        self.assertNotIn('ROUTEWEFT_NPM_TOKEN', env)
+                        self.assertNotIn('NPM_TOKEN', env)
+                        self.assertNotIn('packages.example.test', content)
+                        self.assertIn('registry=https://registry.npmjs.org/', content)
+                        self.assertNotIn('_authToken', content)
+                    else:
+                        self.assertEqual(env['ROUTEWEFT_NPM_TOKEN'], 'secret')
+                        self.assertIn('registry=https://packages.example.test/npm/', content)
                     if command[:2] == ['pnpm', 'install']:
                         self.assertFalse((cwd / 'packages/routing-client/dist').exists())
                     if command[1] == 'pack':
@@ -92,6 +101,45 @@ class FrontendReleaseTests(unittest.TestCase):
                 self.assertIn('routing-client-0.2.0', publishes[0][2])
                 self.assertIn('maplibre-0.1.0', publishes[1][2])
                 self.assertTrue(all(not config.exists() for config in configs))
+
+    def test_install_registry_and_read_token_are_independent_and_cli_overrides_env(self):
+        for override in (None, 'https://cli.example.test/group'):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as source:
+                frontend = self.fixture(source)
+                observed = []
+
+                def run(command, cwd, env):
+                    config = Path(env['NPM_CONFIG_USERCONFIG']).read_text()
+                    if command[0] == 'pnpm':
+                        expected = override or 'https://read.example.test/group'
+                        self.assertIn(f'registry={expected}/', config)
+                        self.assertIn('_authToken=${ROUTEWEFT_NPM_INSTALL_TOKEN}', config)
+                        self.assertEqual(env['ROUTEWEFT_NPM_INSTALL_TOKEN'], 'read-secret')
+                        self.assertNotIn('ROUTEWEFT_NPM_TOKEN', env)
+                        self.assertNotIn('write.example.test', config)
+                        observed.append('install')
+                    if command[1] == 'publish':
+                        self.assertEqual(command[command.index('--registry') + 1], 'https://write.example.test/hosted/')
+                        self.assertIn('registry=https://write.example.test/hosted/', config)
+                        self.assertIn('_authToken=${ROUTEWEFT_NPM_TOKEN}', config)
+                        self.assertEqual(env['ROUTEWEFT_NPM_TOKEN'], 'write-secret')
+                        observed.append('publish')
+                    if command[1] == 'pack':
+                        metadata = json.loads((cwd / 'package.json').read_text())
+                        archive(cwd / 'package.tgz', metadata)
+                        return b'[{"filename":"package.tgz"}]'
+                    self.assertNotIn('read-secret', config)
+                    self.assertNotIn('write-secret', config)
+                    return b''
+
+                with patch.object(release, 'FRONTEND', frontend), patch.object(release, 'load_release_env'), \
+                        patch.object(release, 'run', side_effect=run), patch.dict(os.environ, {
+                            'NPM_REGISTRY': 'https://write.example.test/hosted', 'NPM_TOKEN': 'write-secret',
+                            'NPM_INSTALL_REGISTRY': 'https://read.example.test/group', 'NPM_INSTALL_TOKEN': 'read-secret',
+                        }, clear=True):
+                    release.release(install_registry=override)
+                self.assertIn('install', observed)
+                self.assertEqual(observed.count('publish'), 2)
 
     def test_failed_tests_prevent_publishing(self):
         with tempfile.TemporaryDirectory() as source:
