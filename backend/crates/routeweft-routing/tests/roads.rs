@@ -53,6 +53,87 @@ fn opts() -> QueryOptions {
     }
 }
 #[test]
+fn unaccelerated_routes_survive_failed_customization_and_recustomization() {
+    use routeweft_routing::{acceleration::CustomizationOptions, RoutingAlgorithm};
+    let mut router = engine(
+        (0..12).map(|i| p(i as f64 * 0.001, 0.)).collect(),
+        (0..11)
+            .flat_map(|i| [e(i, i + 1, 1000), e(i + 1, i, 1000)])
+            .collect(),
+        vec![vec![0, 1]],
+    );
+    let points = [p(0.0004, 0.), p(0.0083, 0.), p(0.0037, 0.)];
+    let baseline = router.route_detailed(
+        &points,
+        opts(),
+        &SearchBudget::default(),
+        RoutingAlgorithm::Auto,
+    );
+    assert_eq!(baseline.diagnostics.algorithm, "dijkstra");
+    assert_eq!(router.load_diagnostics().compression_ms, 0.);
+    let baseline = baseline.result.unwrap();
+    assert!(matches!(
+        router.customize(CustomizationOptions {
+            max_bytes: 1,
+            ..Default::default()
+        }),
+        Err(Error::BudgetExceeded)
+    ));
+    let fallback = router
+        .route(&points, opts(), &SearchBudget::default())
+        .unwrap();
+    assert_eq!(baseline.duration_s, fallback.duration_s);
+    for leaf_nodes in [2, 4, 8] {
+        router
+            .customize(CustomizationOptions {
+                leaf_nodes,
+                ..Default::default()
+            })
+            .unwrap();
+        let accelerated = router.route_detailed(
+            &points,
+            opts(),
+            &SearchBudget::default(),
+            RoutingAlgorithm::Auto,
+        );
+        assert_eq!(accelerated.diagnostics.algorithm, "mld");
+        let result = accelerated.result.unwrap();
+        assert_eq!(baseline.duration_s, result.duration_s);
+        assert_eq!(baseline.distance_m, result.distance_m);
+        assert_eq!(baseline.legs.len(), result.legs.len());
+    }
+}
+
+#[test]
+fn public_graph_constructor_keeps_semantic_validation() {
+    let mut manifest = engine(vec![p(0., 0.), p(0.001, 0.)], vec![e(0, 1, 1000)], vec![])
+        .manifest()
+        .clone();
+    for graph in [
+        Graph {
+            nodes: vec![p(f64::NAN, 0.), p(0.001, 0.)],
+            edges: vec![e(0, 1, 1000)],
+            forbidden: vec![],
+        },
+        Graph {
+            nodes: vec![p(0., 0.), p(0.001, 0.)],
+            edges: vec![e(0, 2, 1000)],
+            forbidden: vec![],
+        },
+        Graph {
+            nodes: vec![p(0., 0.), p(0.001, 0.)],
+            edges: vec![e(0, 1, 1000)],
+            forbidden: vec![vec![0, 1]],
+        },
+    ] {
+        manifest.restrictions = graph.forbidden.len();
+        assert!(matches!(
+            Engine::from_graph(manifest.clone(), graph),
+            Err(Error::InvalidDataset)
+        ));
+    }
+}
+#[test]
 fn regional_projection_uses_query_latitude_and_load_budget_precedes_index_build() {
     use routeweft_dataset::{GraphCapacity, LoadOptions};
     let root = std::env::temp_dir().join(format!(
