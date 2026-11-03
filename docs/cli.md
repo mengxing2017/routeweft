@@ -257,4 +257,6 @@ cargo test --release --manifest-path backend/Cargo.toml -p routeweft-daemon \
 
 ## 资源规划
 
-新增 `resource-plan --dataset DIR --graph-capacity city|regional [--max-load-bytes N] [--max-plan-workspace-bytes N] --json`，不加载查询引擎，返回经过身份和图完整性校验的版本化逻辑资源估算。build 成功响应也新增 `resource_plan`。字段、v1 校验范围及未知项见 [资源规划契约](resource-planning.md)。
+`resource-plan --dataset DIR --graph-capacity city|regional [--max-load-bytes N] [--max-plan-workspace-bytes N] --json` 返回 schema/estimator 2 的完整导航计划，覆盖 MLD 定制、已有文件身份和加载需求。接受与 customize 一致的 `--leaf-nodes`、`--fanout`、`--levels`、`--max-boundary`、`--max-shortcuts`、`--max-index-bytes`、`--max-work`、`--timeout-ms`。customize 可用 `--resource-plan FILE` 拒绝不匹配计划。build 内嵌 resource_plan 保留基础 schema 1；字段、验证范围及未知项见 [资源规划契约](resource-planning.md)。
+
+`sample-routes --dataset DIR` 按当前地图和预算生成带合法跨边见证的分层样本，支持数量、途经点数、距离层、路径长度、尝试次数、工作区、work 和期限配置。覆盖不足退出 3 并保留短缺原因。样本可直接交给基准脚本的 `--mode acceptance`，按 MLD、加载、热查询和工作量门槛验收；详见 [导航验收](navigation-acceptance.md)。
