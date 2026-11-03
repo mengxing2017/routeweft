@@ -69,4 +69,4 @@ let route = runtime.route(engine, coordinates, QueryOptions::default(), deadline
 
 本次 runtime 提取已使用 Rust 1.85.0、`--locked --offline` 验证 dataset/routing/runtime 的编译与测试；workspace 继续声明 edition 2021、Rust 1.85。宿主可使用更高版本工具链。
 
-资源估算 API：`routeweft_dataset::estimate_resident` 与 `check_resident_budget` 共用公式；`resource_plan` 在不构造查询索引的前提下验证磁盘产物并返回版本化需求，`resource_plan_from_manifest` 仅供已认证 manifest 使用。详见 [资源规划契约](resource-planning.md)。
+资源估算 API：`routeweft_dataset::estimate_resident` 与 `check_resident_budget` 共用基础图公式；dataset 层 resource_plan / resource_plan_from_manifest 保留基础 schema 1。完整导航计划使用 `routeweft_routing::resources::resource_plan`，schema/estimator 2 覆盖 MLD 定制与加载，并复用执行计费。详见 [资源规划契约](resource-planning.md)。`Engine::sample_routes` 提供带有向跨边见证和连续限制历史的预算采样，详见 [导航验收](navigation-acceptance.md)。
