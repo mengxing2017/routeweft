@@ -235,6 +235,7 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "routeweft-dataset",
  "routeweft-routing",
+ "sha2",
  "tokio",
 ]
 

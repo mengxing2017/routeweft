@@ -10,5 +10,8 @@ routeweft-dataset.workspace = true
 routeweft-routing.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+sha2.workspace = true
+
 [lints]
 workspace = true
