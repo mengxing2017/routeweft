@@ -1,8 +1,8 @@
 //! Versioned, bounded, immutable routing dataset. No process-global resources.
 mod resources;
 pub use resources::{
-    estimate_resident, resource_plan, resource_plan_from_manifest, AllocationEstimate, PlanCounts,
-    ResourcePlan, ESTIMATOR_VERSION,
+    estimate_resident, inspect_topology_bounds, resource_plan, resource_plan_from_manifest,
+    AllocationEstimate, PlanCounts, ResourcePlan, TopologyBounds, ESTIMATOR_VERSION,
 };
 mod identity;
 pub use identity::{is_digest, DatasetIdentity};

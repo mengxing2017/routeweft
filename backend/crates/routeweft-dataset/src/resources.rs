@@ -100,6 +100,47 @@ pub struct PlanCounts {
     pub graph_bytes: u64,
 }
 
+/// Upper bounds for a successfully decoded restriction-state topology. Prefixes
+/// shared by restrictions may be counted more than once; forbidden transitions
+/// are not subtracted. This deliberately needs no routing automaton or CSR.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct TopologyBounds {
+    pub physical_nodes: u64,
+    pub physical_edges: u64,
+    pub restriction_references: u64,
+    pub states: u64,
+    pub transitions: u64,
+}
+
+/// Inspect allocation counts after authenticating with resource_plan. The input
+/// must stay immutable between these calls. V2 uses bounded sequential scans and
+/// a node-sized degree vector; V1 returns a less precise manifest/limit bound.
+pub fn inspect_topology_bounds(
+    path: &std::path::Path,
+    limits: LoadOptions,
+    workspace: u64,
+) -> Result<TopologyBounds> {
+    let m = crate::inspect_manifest(path, limits)?;
+    if m.format == 2 {
+        crate::binary::streaming::topology_bounds(path, &m, limits, workspace)
+    } else {
+        let refs = (m.restrictions as u64)
+            .saturating_mul(256)
+            .min(limits.max_restriction_edges as u64);
+        Ok(TopologyBounds {
+            physical_nodes: m.nodes as u64,
+            physical_edges: m.edges as u64,
+            restriction_references: refs,
+            states: (m.nodes as u64)
+                .checked_add(refs)
+                .ok_or(Error::LimitExceeded)?,
+            transitions: (m.edges as u64)
+                .checked_mul(refs + 1)
+                .ok_or(Error::LimitExceeded)?,
+        })
+    }
+}
+
 /// Use only with an authenticated manifest (e.g. a just-published build).
 pub fn resource_plan_from_manifest(m: &Manifest, limits: LoadOptions) -> Result<ResourcePlan> {
     Ok(ResourcePlan {
@@ -160,6 +201,14 @@ pub fn resource_plan(
     } else {
         use sha2::{Digest, Sha256};
         use std::io::{BufReader, Read};
+        if workspace_bytes < 131072 {
+            return Err(crate::resource_limit(
+                "validation_workspace_bytes",
+                workspace_bytes,
+                131072,
+                "v1_resource_plan",
+            ));
+        }
         let file = crate::controlled_file(path, &m.graph_file, limits.max_bytes)?;
         if file.metadata()?.len() != m.graph_bytes {
             return Err(invalid("integrity"));

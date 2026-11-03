@@ -16,6 +16,92 @@ fn charge(used: &mut u64, bytes: u64, limit: u64) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn topology_bounds(
+    path: &std::path::Path,
+    m: &Manifest,
+    limits: LoadOptions,
+    workspace: u64,
+) -> Result<crate::TopologyBounds> {
+    let file = crate::controlled_file(path, &m.graph_file, limits.max_bytes)?;
+    let mut reader = std::io::BufReader::new(file);
+    // resource_plan has already fully verified v2; still bound every allocation
+    // and check header identity here so this inspection cannot bypass its quota.
+    if &array::<8>(&mut reader)? != MAGIC || u64_read(&mut reader)? != 0 {
+        return Err(invalid("v2 magic/flags"));
+    }
+    let nodes = u64_read(&mut reader)?;
+    let edges = u64_read(&mut reader)?;
+    let sequences = u64_read(&mut reader)?;
+    let _dictionary_count = u64_read(&mut reader)?;
+    let refs = u64_read(&mut reader)?;
+    let dictionary_bytes = u64_read(&mut reader)?;
+    if nodes != m.nodes as u64
+        || edges != m.edges as u64
+        || sequences != m.restrictions as u64
+        || refs > limits.max_restriction_edges as u64
+        || layout(nodes, edges, sequences, refs, dictionary_bytes)? != m.graph_bytes
+    {
+        return Err(invalid("v2 topology counts"));
+    }
+    let mut used = 0;
+    charge(&mut used, 98304, workspace)?;
+    let mut result = crate::TopologyBounds {
+        physical_nodes: nodes,
+        physical_edges: edges,
+        restriction_references: refs,
+        states: nodes,
+        transitions: edges,
+    };
+    if sequences == 0 {
+        return Ok(result);
+    }
+    charge(
+        &mut used,
+        nodes.checked_mul(4).ok_or(Error::LimitExceeded)?,
+        workspace,
+    )?;
+    let mut degrees = vec![0u32; nodes as usize];
+    let edge_start = HEADER + dictionary_bytes + nodes * 16;
+    reader.seek(SeekFrom::Start(edge_start))?;
+    for _ in 0..edges {
+        let record = array::<56>(&mut reader)?;
+        let from = u64::from_le_bytes(record[..8].try_into().unwrap());
+        let degree = degrees
+            .get_mut(from as usize)
+            .ok_or_else(|| invalid("v2 edge"))?;
+        *degree = degree.checked_add(1).ok_or(Error::LimitExceeded)?;
+    }
+    for _ in 0..sequences {
+        let length = u32_read(&mut reader)?;
+        if !(2..=256).contains(&length) {
+            return Err(invalid("restriction length"));
+        }
+        let mut prefix = [0u64; 256];
+        for id in &mut prefix[..length as usize] {
+            *id = u64_read(&mut reader)?;
+            if *id >= edges {
+                return Err(invalid("restriction reference"));
+            }
+        }
+        let resume = reader.stream_position()?;
+        result.states = result
+            .states
+            .checked_add(u64::from(length - 1))
+            .ok_or(Error::LimitExceeded)?;
+        for &edge in &prefix[..length as usize - 1] {
+            reader.seek(SeekFrom::Start(edge_start + edge * EDGE_BYTES + 8))?;
+            let to = u64_read(&mut reader)?;
+            let degree = degrees.get(to as usize).ok_or_else(|| invalid("v2 edge"))?;
+            result.transitions = result
+                .transitions
+                .checked_add(u64::from(*degree))
+                .ok_or(Error::LimitExceeded)?;
+        }
+        reader.seek(SeekFrom::Start(resume))?;
+    }
+    Ok(result)
+}
+
 pub(crate) fn validate(
     reader: &mut (impl Read + Seek),
     m: &Manifest,
