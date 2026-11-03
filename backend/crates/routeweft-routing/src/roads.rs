@@ -1,5 +1,6 @@
 mod components;
 mod compression;
+mod sampling;
 mod search;
 use crate::acceleration::{AccelerationInfo, CustomizationOptions, Index, Link};
 use crate::diagnostics::Context;
@@ -7,6 +8,7 @@ use crate::{Error, QueryOutcome, RoutingAlgorithm, SearchBudget};
 use routeweft_dataset::{Adjacency, Graph, LoadOptions, Manifest, Point};
 use routeweft_domain::model::TravelProfile;
 use rstar::{RTree, RTreeObject, AABB};
+pub use sampling::{RouteSample, RouteSamples, SamplingOptions, SAMPLER_VERSION};
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
