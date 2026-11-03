@@ -6,10 +6,10 @@
 
 | 用途 | 安装 |
 | --- | --- |
-| 仅计算路线、最近道路或交互状态 | `npm install --save-exact @routeweft/routing-client@0.1.0-pre` |
-| 使用 MapLibre 图层 | `npm install --save-exact @routeweft/routing-client@0.1.0-pre @routeweft/maplibre@0.1.0-pre maplibre-gl@5.24.0` |
+| 仅计算路线、最近道路或交互状态 | `npm install --save-exact @routeweft/routing-client@<version>` |
+| 使用 MapLibre 图层 | `npm install --save-exact @routeweft/routing-client@<version> @routeweft/maplibre@<version> maplibre-gl@5.24.0` |
 
-上述是本仓库当前版本；须先发布到所选 registry，不能把 manifest 版本当成远程已存在。pnpm 用户可换成 `pnpm add --save-exact`。提交宿主锁文件，升级前查看对应 README 的迁移说明。
+`<version>` 应替换为所选的已发布前端统一版本，源码版本以 [frontend/package.json](../frontend/package.json) 为准；须先发布到所选 registry，不能把 manifest 版本当成远程已存在。pnpm 用户可换成 `pnpm add --save-exact`。提交宿主锁文件，升级前查看对应 README 的迁移说明。
 
 私有仓库的下游项目 `.npmrc` 示例（将地址换为实际 npm endpoint，使用只读 token）：
 
@@ -133,7 +133,7 @@ RouteLayer 只管理自身 source/layer/marker 与监听器，地图由宿主销
 
 ## 升级和问题定位
 
-当前 `0.1.0-pre` 接口：只需 route 的宿主可实现 RouteTransport 并用 createRouteClient；原 createRoutingClient 仍要求 nearest。新增 planner 不要求任何 UI 框架，MapLibre 已分离到可选包。纬度范围以当前实现 [-85,85] 为准。
+当前接口：只需 route 的宿主可实现 RouteTransport 并用 createRouteClient；原 createRoutingClient 仍要求 nearest。新增 planner 不要求任何 UI 框架，MapLibre 已分离到可选包。纬度范围以当前实现 [-85,85] 为准。
 
 安装 404/403 先检查 registry、scope 映射、版本是否已发布及 token 读权限；类型无法解析检查 ESM/Bundler 配置和包内 dist/index.d.ts；地图不显示先检查宿主样式已加载、route.geometry 和 MapLibre CSS。传输协议/认证错误由宿主排查，不向公共 OSRM 服务发送本包的请求。
 

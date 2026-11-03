@@ -1,11 +1,11 @@
 # @routeweft/maplibre
 
-MapLibre GL JS 5 适配器，版本 `0.1.0-pre`。宿主提供地图实例及已认证的 route transport。
+MapLibre GL JS 5 适配器。宿主提供地图实例及已认证的 route transport。
 
 发布到目标 npm registry 后安装：
 
 ```sh
-npm install --save-exact @routeweft/routing-client@0.1.0-pre @routeweft/maplibre@0.1.0-pre maplibre-gl@5.24.0
+npm install --save-exact @routeweft/routing-client@<version> @routeweft/maplibre@<version> maplibre-gl@5.24.0
 ```
 
 私有 scope 配置、完整类型化示例和清理流程见[外部使用指南](https://github.com/mengxing2017/routeweft/blob/main/docs/frontend-usage.md)。地图须由宿主创建，加载样式并导入 `maplibre-gl/dist/maplibre-gl.css`。以下 transport 和 map 均由宿主提供：
@@ -37,3 +37,5 @@ Run the local synthetic fixture with `pnpm --dir frontend install`, build routin
 ## 版本与发布
 
 版本由本包 package.json 管理，依赖 client 精确版本。仓库根目录使用 `make release-frontend-dry-run` / `make release-frontend-publish`，配置 NPM_REGISTRY / NPM_TOKEN。公共/私有仓库、版本升级及失败续发见[发布指南](https://github.com/mengxing2017/routeweft/blob/main/docs/frontend-release.md)。
+
+`<version>` 请替换为已发布的前端统一版本。源码版本来源为 [frontend/package.json](../../package.json)，由统一版本命令同步包清单。

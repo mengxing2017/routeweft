@@ -15,10 +15,10 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / 'frontend'
 PACKAGES = ('routing-client', 'maplibre')
-SEMVER = re.compile(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)'
-                    r'(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)'
-                    r'(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?'
-                    r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?')
+version_spec = importlib.util.spec_from_file_location('frontend_version', ROOT / 'scripts/frontend-version.py')
+frontend_version = importlib.util.module_from_spec(version_spec)
+version_spec.loader.exec_module(frontend_version)
+SEMVER = frontend_version.SEMVER
 
 
 def load_release_env():
@@ -58,6 +58,7 @@ def run(command, cwd, env):
 
 
 def package_metadata(frontend):
+    frontend_version.check(frontend)
     result = {}
     for package in PACKAGES:
         data = json.loads((frontend / 'packages' / package / 'package.json').read_text())

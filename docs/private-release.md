@@ -12,7 +12,7 @@ make release-publish REGISTRIES=internal
 
 ## 前端 npm 包发布
 
-两个独立版本的接口包 `@routeweft/routing-client` 和 `@routeweft/maplibre` 使用 npm registry。
+两个使用统一前端版本的接口包 `@routeweft/routing-client` 和 `@routeweft/maplibre` 使用 npm registry。
 在 `.private-release.env` 添加 `NPM_REGISTRY`（HTTPS npm endpoint）和 `NPM_TOKEN`，脚本自动加载，无需 source；兼容旧的 `NPM_REGISTRY_INTERNAL` / `NPM_TOKEN_INTERNAL`。
 
 ```bash

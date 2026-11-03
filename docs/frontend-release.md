@@ -2,12 +2,12 @@
 
 `frontend/packages` 中的库通过 npm registry 供外部工程安装，版本独立于 Cargo；React/Vite 首页 `@routeweft/frontend` 是私有应用，不发布。
 
-| 包 | 当前版本 | 外部用途 |
+| 包 | 版本来源 | 外部用途 |
 | --- | --- | --- |
-| `@routeweft/routing-client` | `0.1.0-pre` | TypeScript 类型、route/nearest 客户端、请求控制器、planner |
-| `@routeweft/maplibre` | `0.1.0-pre` | MapLibre 5 路线图层、途经点和点选适配；依赖 client `0.1.0-pre` |
+| `@routeweft/routing-client` | frontend/package.json 的 version | TypeScript 类型、route/nearest 客户端、请求控制器、planner |
+| `@routeweft/maplibre` | 同一统一版本 | MapLibre 5 路线图层、途经点和点选适配；精确依赖同版本 client |
 
-版本值来自各包 `package.json`，不是远程已发布状态。包为 ESM，包含 `dist/index.js`、`dist/index.d.ts`、README 和来源/许可声明。原创代码许可维持现有声明，发布配置不变更许可。下游接入见[使用指南](frontend-usage.md)。
+唯一版本来源为 [frontend/package.json](../frontend/package.json) 的 version；两个库的 manifest、内部精确依赖及 client 锁文件版本均由统一命令派生。前端版本独立于 Cargo，源码版本不是远程已发布状态。包为 ESM，包含 `dist/index.js`、`dist/index.d.ts`、README 和来源/许可声明。原创代码许可维持现有声明，发布配置不变更许可。下游接入见[使用指南](frontend-usage.md)。
 
 ## 环境与仓库配置
 
@@ -69,24 +69,20 @@ python3 scripts/frontend-release.py --registry https://registry.npmjs.org/ --acc
 
 采用 SemVer。修复升级 patch；兼容新增能力升级 minor；不兼容 API 修改应升级 major，0.x 阶段以 minor 明确表达破坏性变化，并写迁移说明。CLI JSON schema、Rust crate 版本、数据集格式与 npm 版本是不同契约。
 
-在仓库根目录更新，例如 client `0.1.0-pre → 0.1.0-pre.1`：
+在仓库根目录统一更新，例如：
 
 ```bash
-npm --prefix frontend/packages/routing-client version 0.1.0-pre.1 --no-git-tag-version
-```
-
-随后编辑 `frontend/packages/maplibre/package.json`，把 `dependencies.@routeweft/routing-client` 同步为精确 `0.1.0-pre.1`。由于 adapter 的依赖发生变化，已发布过的 adapter 也须升级自身版本，例如：
-
-```bash
-npm --prefix frontend/packages/maplibre version 0.1.0-pre.1 --no-git-tag-version
-pnpm --dir frontend install --lockfile-only
+make frontend-version FRONTEND_VERSION=0.1.0-pre.2
+make frontend-version-check
 make check-frontend
 make release-frontend-dry-run
 ```
 
-提交两个 manifest、`frontend/pnpm-lock.yaml`、client 的 `package-lock.json` 和版本相关文档。当前两包统一为 `0.1.0-pre`，默认发布到 `next`，下游须显式指定版本。首次发布当前版本时无需人为递增；远端已有版本才需要新版本。发布命令不会自动改版本、提交或创建 Git tag。建议完成审查后记录如 `routing-client-v0.1.0-pre.1`、`maplibre-v0.1.0-pre.1` 的来源标签。
+也可先编辑根 `frontend/package.json` 的 version，再执行 `make frontend-version-sync`。不要分别执行子包的 npm version。命令离线同步两包版本、所有包间精确版本依赖和 client 的 package-lock 根元数据，不改变第三方依赖解析；当前 pnpm 锁的内部依赖为 workspace 链接，无需更新。
 
-预发布示例：`0.1.0-pre.1`。保持 adapter 依赖与选定 client 精确版本一致；默认稳定版 tag 为 `latest`，预发布为 `next`，也可 `--tag beta`。脚本禁止将预发布显式打到 latest：
+提交根/子包 manifest 和更新的锁文件。`make check-frontend` 及发布脚本会检查统一版本，发现漂移即在安装、打包和上传前失败。发布脚本不修改版本、提交或创建 Git tag；版本已在目标仓库存在时，应使用统一命令递增后再发布。两个接口包采用相同版本，即使只选择上传一个包，也须保证源码版本一致。
+
+预发布示例：`0.1.0-pre.1`。包间精确依赖由统一命令同步；默认稳定版 tag 为 `latest`，预发布为 `next`，也可 `--tag beta`。脚本禁止将预发布显式打到 latest：
 
 ```bash
 make release-frontend-dry-run FRONTEND_RELEASE_ARGS="--tag next"
@@ -123,9 +119,9 @@ make release-frontend-publish FRONTEND_RELEASE_ARGS="--package maplibre"
 在一个没有本仓库 workspace、override 或相对路径依赖的新目录中验证。私有地址通过下游 `.npmrc` 的 scope 映射配置（见[使用指南](frontend-usage.md)）：
 
 ```bash
-npm view @routeweft/routing-client@0.1.0-pre version
-npm view @routeweft/maplibre@0.1.0-pre dependencies
-npm install --save-exact @routeweft/routing-client@0.1.0-pre @routeweft/maplibre@0.1.0-pre maplibre-gl@5.24.0
+npm view @routeweft/routing-client@<version> version
+npm view @routeweft/maplibre@<version> dependencies
+npm install --save-exact @routeweft/routing-client@<version> @routeweft/maplibre@<version> maplibre-gl@5.24.0
 ```
 
-核对安装版本、类型检查、ESM 导入和宿主 transport smoke。MapLibre 在浏览器中验收图层与销毁；不要用 Node SSR 导入成功代替地图行为验收。第一次正式发布还必须完成远程无本地链接安装验证，仓库内测试不能替代它。
+`<version>` 替换为已发布的前端统一版本。核对安装版本、类型检查、ESM 导入和宿主 transport smoke。MapLibre 在浏览器中验收图层与销毁；不要用 Node SSR 导入成功代替地图行为验收。第一次正式发布还必须完成远程无本地链接安装验证，仓库内测试不能替代它。

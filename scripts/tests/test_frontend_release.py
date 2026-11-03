@@ -30,7 +30,8 @@ def archive(path, metadata, missing=None):
 class FrontendReleaseTests(unittest.TestCase):
     def fixture(self, root):
         frontend = Path(root)
-        for name, version in [('routing-client', '0.2.0'), ('maplibre', '0.1.0')]:
+        (frontend / 'package.json').write_text(json.dumps({'name': '@routeweft/frontend', 'version': '0.2.0', 'private': True}))
+        for name, version in [('routing-client', '0.2.0'), ('maplibre', '0.2.0')]:
             directory = frontend / 'packages' / name
             directory.mkdir(parents=True)
             metadata = {'name': '@routeweft/' + name, 'version': version}
@@ -39,6 +40,9 @@ class FrontendReleaseTests(unittest.TestCase):
             (directory / 'package.json').write_text(json.dumps(metadata))
             (directory / 'dist').mkdir()
             (directory / 'dist/stale.js').write_text('stale')
+        (frontend / 'packages/routing-client/package-lock.json').write_text(json.dumps({
+            'name': '@routeweft/routing-client', 'version': '0.2.0', 'lockfileVersion': 3,
+            'packages': {'': {'version': '0.2.0'}}}))
         return frontend
 
     def test_registry_auth_is_scoped_and_token_not_written(self):
@@ -99,7 +103,7 @@ class FrontendReleaseTests(unittest.TestCase):
                     self.assertEqual(publishes[0][:-1], publishes[2])
                     self.assertEqual(publishes[1][:-1], publishes[3])
                 self.assertIn('routing-client-0.2.0', publishes[0][2])
-                self.assertIn('maplibre-0.1.0', publishes[1][2])
+                self.assertIn('maplibre-0.2.0', publishes[1][2])
                 self.assertTrue(all(not config.exists() for config in configs))
 
     def test_install_registry_and_read_token_are_independent_and_cli_overrides_env(self):
@@ -182,8 +186,9 @@ class FrontendReleaseTests(unittest.TestCase):
             frontend = self.fixture(source)
             path = frontend / 'packages/maplibre/package.json'
             metadata = json.loads(path.read_text())
-            metadata['version'] = '0.2.0-alpha.1'
-            path.write_text(json.dumps(metadata))
+            for changed, content in release.frontend_version.changes(frontend, '0.2.0-alpha.1').items():
+                changed.write_text(content)
+            metadata = json.loads(path.read_text())
             calls = []
             def run(command, cwd, env):
                 calls.append(command)
@@ -215,10 +220,49 @@ class FrontendReleaseTests(unittest.TestCase):
                     release.package_metadata(frontend)
             metadata['version'] = '0.2.1'
             path.write_text(json.dumps(metadata))
-            with self.assertRaisesRegex(ValueError, 'exact routing-client'):
+            with self.assertRaisesRegex(ValueError, 'Frontend versions differ'):
                 release.package_metadata(frontend)
             for version in ['1.0.0', '1.0.0-alpha.1', '0.2.1+build.7']:
                 self.assertIsNotNone(release.SEMVER.fullmatch(version))
+
+    def test_unified_version_updates_lock_and_internal_dependency_without_changing_resolutions(self):
+        with tempfile.TemporaryDirectory() as source:
+            frontend = self.fixture(source)
+            lock_path = frontend / 'packages/routing-client/package-lock.json'
+            lock = json.loads(lock_path.read_text())
+            lock['packages']['node_modules/typescript'] = {'version': '5.9.3', 'integrity': 'unchanged'}
+            lock_path.write_text(json.dumps(lock))
+            for path, content in release.frontend_version.changes(frontend, '1.2.3-beta.2').items():
+                path.write_text(content)
+            self.assertEqual(release.frontend_version.check(frontend), '1.2.3-beta.2')
+            metadata = release.package_metadata(frontend)
+            self.assertEqual({d['version'] for d in metadata.values()}, {'1.2.3-beta.2'})
+            self.assertEqual(metadata['maplibre']['dependencies']['@routeweft/routing-client'], '1.2.3-beta.2')
+            updated = json.loads(lock_path.read_text())
+            self.assertEqual(updated['version'], '1.2.3-beta.2')
+            self.assertEqual(updated['packages']['']['version'], '1.2.3-beta.2')
+            self.assertEqual(updated['packages']['node_modules/typescript'], lock['packages']['node_modules/typescript'])
+            self.assertEqual(release.frontend_version.changes(frontend), {})
+            before = lock_path.read_bytes()
+            with self.assertRaises(ValueError):
+                release.frontend_version.changes(frontend, '01.2.3')
+            self.assertEqual(lock_path.read_bytes(), before)
+
+    def test_version_drift_blocks_release_before_dependency_install(self):
+        for relative in ('package.json', 'packages/maplibre/package.json', 'packages/routing-client/package-lock.json'):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as source:
+                frontend = self.fixture(source)
+                path = frontend / relative
+                data = json.loads(path.read_text())
+                data['version'] = '9.0.0'
+                path.write_text(json.dumps(data))
+                with patch.object(release, 'FRONTEND', frontend), patch.object(release, 'load_release_env'), \
+                        patch.object(release, 'run') as run, patch.dict(os.environ, {
+                            'NPM_REGISTRY': 'https://write.example.test/', 'NPM_TOKEN': 'secret',
+                        }, clear=True):
+                    with self.assertRaisesRegex(ValueError, 'Frontend versions differ'):
+                        release.release()
+                run.assert_not_called()
 
     def test_archive_rejects_missing_types_and_local_dependencies(self):
         with tempfile.TemporaryDirectory() as root:

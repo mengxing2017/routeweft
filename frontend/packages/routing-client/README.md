@@ -7,7 +7,7 @@
 发布到目标 npm registry 后，下游固定版本安装：
 
 ```sh
-npm install --save-exact @routeweft/routing-client@0.1.0-pre
+npm install --save-exact @routeweft/routing-client@<version>
 ```
 
 私有 registry 配置、完整 transport/planner 示例见[外部使用指南](https://github.com/mengxing2017/routeweft/blob/main/docs/frontend-usage.md)。
@@ -20,7 +20,7 @@ npm ci
 npm test
 npm pack
 # 在下游工程中安装上一步生成的包（替换实际路径）
-npm install /path/to/routeweft-routing-client-0.1.0-pre.tgz
+npm install /path/to/routeweft-routing-client-<version>.tgz
 ```
 
 包包含编译后的 JS、类型声明和第三方声明。支持显式指定公共或私有 npm registry；项目原创代码许可维持第三方声明中的现有说明。
@@ -77,3 +77,5 @@ make release-frontend-publish
 `createRoutePlanner` exposes immutable snapshots/subscriptions, 2–10 waypoint editing, picking, swap, clear, cancellation and calculation. Generation checks suppress stale results and errors even when the transport ignores AbortSignal. The planner retains original world coordinates; the client normalizes only the request.
 
 MapLibre rendering lives in the optional `@routeweft/maplibre` peer adapter. See its runnable example and resource lifecycle API.
+
+`<version>` 请替换为已发布的前端统一版本。源码版本来源为 [frontend/package.json](../../package.json)，由统一版本命令同步包清单。

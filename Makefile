@@ -8,6 +8,7 @@ check-backend: fmt-check
 	cargo test --manifest-path backend/Cargo.toml --workspace
 
 check-frontend:
+	python3 scripts/frontend-version.py --check
 	pnpm --dir frontend/packages/routing-client test
 	pnpm --dir frontend/packages/maplibre build
 	pnpm --dir frontend/packages/maplibre test
@@ -52,6 +53,18 @@ release-test:
 	python3 -m unittest discover -s scripts/tests -v
 
 FRONTEND_RELEASE_ARGS ?=
+FRONTEND_VERSION ?=
+
+.PHONY: frontend-version frontend-version-sync frontend-version-check
+frontend-version:
+	@test -n "$(FRONTEND_VERSION)" || { echo '请指定 FRONTEND_VERSION，例如 0.1.0-pre.2' >&2; exit 2; }
+	python3 scripts/frontend-version.py --set-version "$(FRONTEND_VERSION)"
+
+frontend-version-sync:
+	python3 scripts/frontend-version.py --sync
+
+frontend-version-check:
+	python3 scripts/frontend-version.py --check
 
 .PHONY: release-frontend-dry-run release-frontend-publish
 
