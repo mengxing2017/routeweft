@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways|quarantine_ways] [--json]\nrouteweft audit-restrictions --input FILE.osm.pbf --output DIR [--max-memory-bytes N] [--json]\nrouteweft resource-plan --dataset DIR [--graph-capacity city|regional] [--max-plan-workspace-bytes N] [--json]\nrouteweft coverage --dataset DIR [--excluded-ways FILE.json] [load limits]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N] [--max-index-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways|quarantine_ways (default quarantine_ways); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways/quarantine_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways|quarantine_ways] [--json]\nrouteweft audit-restrictions --input FILE.osm.pbf --output DIR [--max-memory-bytes N] [--json]\nrouteweft resource-plan --dataset DIR [--graph-capacity city|regional] [--max-plan-workspace-bytes N] [--json]\nrouteweft coverage --dataset DIR [--excluded-ways FILE.json] [load limits]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N] [--max-index-bytes N] [--resource-plan FILE]\nrouteweft sample-routes --dataset DIR [--count N] [--distance-bands-m 1000,10000|none] [--max-sample-workspace-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways|quarantine_ways (default quarantine_ways); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways/quarantine_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -143,10 +143,24 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             | "route"
             | "customize"
             | "serve"
+            | "sample-routes"
     ) {
         return Err(bad("unknown command"));
     }
     let allowed: &[&str] = match command.as_str() {
+        "sample-routes" => &[
+            "--dataset",
+            "--graph-capacity",
+            "--max-load-bytes",
+            "--count",
+            "--waypoints",
+            "--max-path-edges",
+            "--max-attempts",
+            "--max-sample-workspace-bytes",
+            "--distance-bands-m",
+            "--max-work",
+            "--timeout-ms",
+        ],
         "build" => &[
             "--input",
             "--profile",
@@ -742,6 +756,45 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     let engine =
         Engine::open_with_capacity(dataset, load_limits, graph_capacity).map_err(query_error)?;
     let load_ms = load.elapsed().as_secs_f64() * 1000.;
+    if command == "sample-routes" {
+        let size = |key, default| {
+            usize::try_from(number(key, default)?).map_err(|_| bad(format!("invalid {key}")))
+        };
+        let distance_bands_m = match flags.get("--distance-bands-m") {
+            Some(&"none") => Vec::new(),
+            Some(text) => text
+                .split(',')
+                .map(|v| v.parse().map_err(|_| bad("distance bands")))
+                .collect::<Result<_, _>>()?,
+            None => vec![1000., 10000.],
+        };
+        let options = routeweft_routing::SamplingOptions {
+            count: size("--count", 12)?,
+            waypoints: size("--waypoints", 2)?,
+            max_path_edges: size("--max-path-edges", 1024)?,
+            max_attempts: size("--max-attempts", 10000)?,
+            max_workspace_bytes: number("--max-sample-workspace-bytes", 16 * 1024 * 1024)?,
+            distance_bands_m,
+        };
+        let timeout = number("--timeout-ms", 30000)?;
+        let budget = SearchBudget {
+            max_work: size("--max-work", 2_000_000)?,
+            deadline: Some(
+                Instant::now()
+                    .checked_add(Duration::from_millis(timeout))
+                    .ok_or_else(|| bad("timeout"))?,
+            ),
+            ..Default::default()
+        };
+        let samples = engine
+            .sample_routes(options, &budget)
+            .map_err(query_error)?;
+        return Ok(
+            json!({"schema":1,"status":if samples.coverage_complete {"ok"} else {"insufficient"},
+            "sampling":samples,"timeout_ms":timeout,"load_ms":load_ms,"load_diagnostics":engine.load_diagnostics(),
+            "acceleration_sha256":engine.acceleration_sha256()}),
+        );
+    }
     if command == "coverage" {
         let excluded: Vec<i64> = if let Some(path) = flags.get("--excluded-ways") {
             let mut bytes = Vec::new();
@@ -852,7 +905,11 @@ fn serve(
     let mut input = stdin.lock();
     let mut output = std::io::stdout().lock();
     writeln!(output, "{}", json!({"schema":1,"status":"ready","dataset_id":engine.manifest().dataset_id,
-        "load_ms":load_ms,"load_diagnostics":engine.load_diagnostics(),"acceleration":engine.acceleration_info()})).map_err(|_| query_error(routeweft_routing::Error::Io))?;
+        "load_ms":load_ms,"load_diagnostics":engine.load_diagnostics(),"acceleration":engine.acceleration_info(),
+        "acceleration_sha256":engine.acceleration_sha256(),"graph_sha256":engine.manifest().graph_sha256,
+        "profile":engine.manifest().profile,"effective_query_limits":{"max_work":defaults.max_work,
+            "max_states":defaults.max_states,"max_queue":defaults.max_queue,"max_geometry":defaults.max_geometry,
+            "timeout_ms":timeout_ms}})).map_err(|_| query_error(routeweft_routing::Error::Io))?;
     output
         .flush()
         .map_err(|_| query_error(routeweft_routing::Error::Io))?;
@@ -1014,10 +1071,15 @@ fn main() -> ExitCode {
     }
     match execute(args) {
         Ok(value) => {
+            let insufficient = value.get("status").and_then(Value::as_str) == Some("insufficient");
             if !value.is_null() {
                 println!("{value}");
             }
-            ExitCode::SUCCESS
+            if insufficient {
+                ExitCode::from(3)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => {
             let code = e.code;
