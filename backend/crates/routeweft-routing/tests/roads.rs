@@ -1188,3 +1188,21 @@ fn coverage_reports_directed_components_and_exclusion_residue() {
     assert_eq!(engine.coverage(&[2]).unwrap().excluded_way_edges, 0);
     assert!(matches!(engine.coverage(&[2, 1]), Err(Error::InvalidInput)));
 }
+
+#[test]
+fn single_edge_graph_never_fills_cross_edge_sample_coverage() {
+    let router = engine(vec![p(0., 0.), p(0.001, 0.)], vec![e(0, 1, 1000)], vec![]);
+    let samples = router
+        .sample_routes(
+            routeweft_routing::SamplingOptions {
+                count: 1,
+                distance_bands_m: vec![],
+                ..Default::default()
+            },
+            &SearchBudget::default(),
+        )
+        .unwrap();
+    assert!(!samples.coverage_complete);
+    assert!(samples.pairs.is_empty());
+    assert!(samples.shortfall_reasons.contains(&"no_cross_edge_path"));
+}
