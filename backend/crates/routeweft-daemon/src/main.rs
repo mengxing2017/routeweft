@@ -95,6 +95,38 @@ fn point(input: &str) -> Result<Point, Failure> {
     p.coordinate().map_err(|_| bad("coordinate range"))?;
     Ok(p)
 }
+fn customization_timeout(flags: &BTreeMap<&str, &str>) -> Result<u64, Failure> {
+    flags
+        .get("--timeout-ms")
+        .map(|v| v.parse().map_err(|_| bad("timeout")))
+        .unwrap_or(Ok(1_800_000))
+}
+fn customization_options(
+    flags: &BTreeMap<&str, &str>,
+    deadline: Option<Instant>,
+) -> Result<CustomizationOptions, Failure> {
+    let number = |key, default| {
+        flags
+            .get(key)
+            .map(|v| v.parse::<u64>().map_err(|_| bad(format!("invalid {key}"))))
+            .unwrap_or(Ok(default))
+    };
+    let size = |key, default| {
+        usize::try_from(number(key, default)?).map_err(|_| bad(format!("invalid {key}")))
+    };
+    let options = CustomizationOptions {
+        leaf_nodes: size("--leaf-nodes", 256)?,
+        fanout: size("--fanout", 8)?,
+        levels: size("--levels", 3)?,
+        max_boundary: size("--max-boundary", 128)?,
+        max_shortcuts: size("--max-shortcuts", 20_000_000)?,
+        max_work: size("--max-work", 2_000_000_000)?,
+        max_bytes: number("--max-index-bytes", 2 * 1024 * 1024 * 1024)?,
+        deadline,
+    };
+    options.validate().map_err(query_error)?;
+    Ok(options)
+}
 fn execute(args: Vec<String>) -> Result<Value, Failure> {
     let command = &args[0];
     if !matches!(
@@ -156,6 +188,14 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--graph-capacity",
             "--max-load-bytes",
             "--max-plan-workspace-bytes",
+            "--leaf-nodes",
+            "--fanout",
+            "--levels",
+            "--max-boundary",
+            "--max-shortcuts",
+            "--max-index-bytes",
+            "--max-work",
+            "--timeout-ms",
         ],
         "coverage" => &[
             "--dataset",
@@ -173,6 +213,10 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--max-shortcuts",
             "--max-work",
             "--timeout-ms",
+            "--leaf-nodes",
+            "--fanout",
+            "--resource-plan",
+            "--max-plan-workspace-bytes",
         ],
         "serve" => &[
             "--dataset",
@@ -241,41 +285,64 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             .ok_or_else(|| bad(format!("missing {key}")))
     };
     if command == "version" {
+        let commands = [
+            "resource-plan",
+            "build",
+            "audit-restrictions",
+            "preflight",
+            "inspect",
+            "verify",
+            "coverage",
+            "nearest",
+            "route",
+            "customize",
+            "serve",
+            "sample-routes",
+            "version",
+        ];
+        let resource_capability = json!({"schema":2,"estimator_version":routeweft_routing::resources::ESTIMATOR_VERSION,
+            "base_estimator_version":routeweft_dataset::ESTIMATOR_VERSION,"command":"resource-plan",
+            "build_output":true,"build_output_schema":1,"build_output_scope":"base_graph_only",
+            "query_indexes_constructed":false,"mld_customization":true,"mld_load":true,
+            "customize_plan_binding":true,"kind":"conservative_upper_bound_not_rss"});
+        let sampling_capability = json!({"command":"sample-routes","schema":1,"sampler_version":routeweft_routing::SAMPLER_VERSION,
+            "directed_witness":true,"continuous_restriction_history":true,"distance":"od_great_circle_m",
+            "bounded_workspace":true,"coordinates_from_graph":true});
+        let capabilities = json!({
+            "builder":"in_memory", "build_modes":["memory","external"],
+            "external_build_formats":[2], "external_memory_build":false,
+            "graph_capacity_profiles": {"city":{"nodes":1000000,"edges":2000000,"bytes":268435456,"span_degrees":5},
+                "regional":{"nodes":8000000,"edges":16000000,"bytes":2147483648_u64,"span_degrees":10,"builder":"external","format":2}},
+            "routing_acceleration":{"algorithm":"mld","file":"routing.mld","version":2,"format":"RWFTML02","optional":true,"restriction_edges":"state_graph"},
+            "resource_plan":resource_capability,
+            "resident_jsonl":true,
+            "route_sampling":sampling_capability,
+            "v2_verify":"streaming", "runtime_memory_budget_kind":"estimated_allocations_not_rss",
+            "large_pbf_3gib":false, "dataset_access":"in_memory",
+            "preflight":"full_semantic_build", "preflight_cache":false,
+            "preflight_modes":["full","structure"],
+            "inspect_modes":["full","metadata"],
+            "graph_io":"streaming_json_or_binary_v2", "dataset_write_formats":[1,2], "build_revalidates_input":true,
+            "limits": {"input_bytes":536870912,"decoded_bytes":536870912,
+                "estimated_osm_bytes":536870912,"osm_objects":2000000,
+                "blob_bytes":33554432,"graph_bytes":268435456,
+                "graph_nodes":1000000,"graph_edges":2000000,
+                "restriction_edges":1000000,"v2_graph_string_bytes":268435456},
+            "external_decode_limits": {"input_bytes":536870912,
+                "osm_objects":routeweft_preprocess::pbf::STREAM_OBJECTS,
+                "osm_work_bytes":routeweft_preprocess::pbf::STREAM_OBJECT_BYTES,
+                "decoded_bytes":routeweft_preprocess::pbf::STREAM_DECODED_BYTES,
+                "kind":"cumulative_work_not_retained_memory"},
+            "restriction_audit": {"default_records":4096,"max_records":32768,"default_bytes":16777216,
+                "max_bytes":16777216,"memory_charge_bytes":67108864,"default_blockways_attempts":64,"max_blockways_attempts":257},
+            "memory_limit_kind":"estimated_objects_not_rss"
+        });
         return Ok(
             json!({"schema":1,"status":"ok","version":env!("CARGO_PKG_VERSION"),
             "build":serde_json::from_str::<Value>(include_str!(concat!(env!("OUT_DIR"), "/build-identity.json"))).expect("build identity"),
-            "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],
-            "commands":["resource-plan","build","audit-restrictions","preflight","inspect","verify","coverage","nearest","route","customize","serve","version"],
+            "cli_schema":1,"dataset_formats":[1,2],"profiles":["driving-v1"],"commands":commands,
             "invalid_restriction_policies":["reject","block_ways","quarantine_ways"],
-            "invalid_maxspeed_policies":["reject","use_default"],
-            "capabilities": {
-                "builder":"in_memory", "build_modes":["memory","external"],
-                "external_build_formats":[2], "external_memory_build":false,
-                "graph_capacity_profiles": {"city":{"nodes":1000000,"edges":2000000,"bytes":268435456,"span_degrees":5},
-                    "regional":{"nodes":8000000,"edges":16000000,"bytes":2147483648_u64,"span_degrees":10,"builder":"external","format":2}},
-                "routing_acceleration":{"algorithm":"mld","file":"routing.mld","version":1,"optional":true,"restriction_edges":"explicit"},
-                "resource_plan":{"schema":1,"estimator_version":routeweft_dataset::ESTIMATOR_VERSION,"command":"resource-plan","build_output":true,"query_indexes_constructed":false},
-                "resident_jsonl":true,
-                "v2_verify":"streaming", "runtime_memory_budget_kind":"estimated_allocations_not_rss",
-                "large_pbf_3gib":false, "dataset_access":"in_memory",
-                "preflight":"full_semantic_build", "preflight_cache":false,
-                "preflight_modes":["full","structure"],
-                "inspect_modes":["full","metadata"],
-                "graph_io":"streaming_json_or_binary_v2", "dataset_write_formats":[1,2], "build_revalidates_input":true,
-                "limits": {"input_bytes":536870912,"decoded_bytes":536870912,
-                    "estimated_osm_bytes":536870912,"osm_objects":2000000,
-                    "blob_bytes":33554432,"graph_bytes":268435456,
-                    "graph_nodes":1000000,"graph_edges":2000000,
-                    "restriction_edges":1000000,"v2_graph_string_bytes":268435456},
-                "external_decode_limits": {"input_bytes":536870912,
-                    "osm_objects":routeweft_preprocess::pbf::STREAM_OBJECTS,
-                    "osm_work_bytes":routeweft_preprocess::pbf::STREAM_OBJECT_BYTES,
-                    "decoded_bytes":routeweft_preprocess::pbf::STREAM_DECODED_BYTES,
-                    "kind":"cumulative_work_not_retained_memory"},
-                "restriction_audit": {"default_records":4096,"max_records":32768,"default_bytes":16777216,
-                    "max_bytes":16777216,"memory_charge_bytes":67108864,"default_blockways_attempts":64,"max_blockways_attempts":257},
-                "memory_limit_kind":"estimated_objects_not_rss"
-            }}),
+            "invalid_maxspeed_policies":["reject","use_default"],"capabilities":capabilities}),
         );
     }
     if command == "audit-restrictions" {
@@ -548,8 +615,12 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
                     .map_err(|_| bad("invalid --max-plan-workspace-bytes"))
             })
             .unwrap_or(Ok(64 * 1024 * 1024))?;
-        let plan = routeweft_dataset::resource_plan(dataset, load_limits, workspace)
-            .map_err(data_error)?;
+        let options = customization_options(&flags, None)?;
+        let plan =
+            routeweft_routing::resources::resource_plan(dataset, load_limits, workspace, options)
+                .map_err(query_error)?;
+        let mut plan = json!(plan);
+        plan["customization_timeout_ms"] = json!(customization_timeout(&flags)?);
         return Ok(
             json!({"schema":1,"status":"ok","graph_capacity":graph_capacity,"resource_plan":plan}),
         );
@@ -594,26 +665,75 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         routeweft_dataset::check_resident_budget(&metadata, load_limits, true)
             .map_err(data_error)?;
         let timeout = number("--timeout-ms", 1_800_000)?;
-        let options = CustomizationOptions {
-            levels: usize::try_from(number("--levels", 3)?).map_err(|_| bad("levels"))?,
-            max_boundary: usize::try_from(number("--max-boundary", 128)?)
-                .map_err(|_| bad("boundary limit"))?,
-            max_shortcuts: usize::try_from(number("--max-shortcuts", 20_000_000)?)
-                .map_err(|_| bad("shortcut limit"))?,
-            max_bytes: number("--max-index-bytes", 2 * 1024 * 1024 * 1024)?,
-            max_work: usize::try_from(number("--max-work", 2_000_000_000)?)
-                .map_err(|_| bad("work limit"))?,
-            deadline: Some(
+        let options = customization_options(
+            &flags,
+            Some(
                 Instant::now()
                     .checked_add(Duration::from_millis(timeout))
                     .ok_or_else(|| bad("timeout"))?,
             ),
-            ..Default::default()
-        };
+        )?;
+        if let Some(receipt) = flags.get("--resource-plan") {
+            let mut bytes = Vec::new();
+            std::fs::File::open(receipt)
+                .map_err(|e| data_error(e.into()))?
+                .take(1_048_577)
+                .read_to_end(&mut bytes)
+                .map_err(|e| data_error(e.into()))?;
+            if bytes.len() > 1_048_576 {
+                return Err(bad("resource plan exceeds 1 MiB"));
+            }
+            let document: Value =
+                serde_json::from_slice(&bytes).map_err(|_| bad("invalid resource plan JSON"))?;
+            let supplied = document.get("resource_plan").unwrap_or(&document);
+            let current = routeweft_routing::resources::resource_plan(
+                dataset,
+                load_limits,
+                number("--max-plan-workspace-bytes", 64 * 1024 * 1024)?,
+                options,
+            )
+            .map_err(query_error)?;
+            let current = json!(current);
+            for field in [
+                "schema",
+                "estimator_version",
+                "dataset_id",
+                "graph_sha256",
+                "profile",
+                "base_estimator_version",
+                "source_sha256",
+                "format",
+                "counts",
+                "topology_upper_bound",
+                "customization",
+                "customize",
+                "accelerated_load",
+                "engine_resident_bytes",
+                "acceleration_present",
+                "acceleration",
+            ] {
+                if supplied.get(field) != current.get(field) {
+                    return Err(bad(format!("resource plan mismatch: {field}")));
+                }
+            }
+            if supplied.get("customization_timeout_ms") != Some(&json!(timeout)) {
+                return Err(bad("resource plan mismatch: customization_timeout_ms"));
+            }
+        }
         let start = Instant::now();
         let info = acceleration::customize(dataset, load_limits, options).map_err(query_error)?;
+        let artifact_sha256 = routeweft_dataset::hash_file(&dataset.join(acceleration::FILE_NAME))
+            .map_err(data_error)?;
+        let build: Value = serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/build-identity.json"
+        )))
+        .expect("build identity");
         return Ok(
-            json!({"schema":1,"status":"ok","acceleration":info,"elapsed_ms":start.elapsed().as_secs_f64()*1000.}),
+            json!({"schema":1,"status":"ok","acceleration":info,"elapsed_ms":start.elapsed().as_secs_f64()*1000.,
+                "dataset_id":metadata.dataset_id,"graph_sha256":metadata.graph_sha256,"profile":metadata.profile,
+                "customization":options,"customization_timeout_ms":timeout,"tool_build":build,
+                "acceleration_sha256":artifact_sha256,"acceleration_format":"RWFTML02"}),
         );
     }
     let load = Instant::now();
