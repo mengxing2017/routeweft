@@ -48,6 +48,15 @@ impl Loader for FakeLoader {
     fn identity(&self, engine: &DatasetIdentity) -> DatasetIdentity {
         engine.clone()
     }
+    fn open_resources(
+        &self,
+        path: &std::path::Path,
+        expected: &crate::EngineResourceIdentity,
+        config: LoadConfig,
+    ) -> Result<DatasetIdentity, RuntimeError> {
+        // Synthetic loader: identities stand in for authenticated resource sets.
+        self.open(path, &expected.dataset, config)
+    }
 }
 fn identity(id: char) -> DatasetIdentity {
     DatasetIdentity {
@@ -63,6 +72,59 @@ fn deadline() -> Instant {
 }
 fn runtime(loader: Arc<FakeLoader>) -> Runtime<FakeLoader> {
     Runtime::new(loader, RuntimeConfig::default())
+}
+#[tokio::test]
+async fn resource_single_flight_keeps_inflight_revision_and_abandoned_lease() {
+    let loader = FakeLoader::new(0);
+    let runtime = Runtime::new(
+        loader.clone(),
+        RuntimeConfig {
+            resident_datasets: 2,
+            parallel_loads: 2,
+            ..Default::default()
+        },
+    );
+    let expected = crate::EngineResourceIdentity {
+        dataset: identity('a'),
+        mld_sha256: None,
+    };
+    let dropped = Arc::new(AtomicBool::new(false));
+    let waiter = {
+        let r = runtime.clone();
+        let expected = expected.clone();
+        let guard = Arc::new(Guard(dropped.clone()));
+        tokio::spawn(async move {
+            r.load_resources_with_lease("raw".into(), expected, deadline(), Some(guard))
+                .await
+        })
+    };
+    loader.started.acquire().await.unwrap().forget();
+    waiter.abort();
+    let _ = waiter.await;
+    assert!(!dropped.load(Ordering::Relaxed));
+    runtime.evict(&expected.dataset.dataset_id).await;
+    let upgraded = {
+        let r = runtime.clone();
+        let mut expected = expected.clone();
+        expected.mld_sha256 = Some("b".repeat(64));
+        tokio::spawn(async move { r.load_resources("mld".into(), expected, deadline()).await })
+    };
+    // A different MLD identity must start a distinct flight for the same graph.
+    loader.started.acquire().await.unwrap().forget();
+    let same = {
+        let r = runtime.clone();
+        let expected = expected.clone();
+        tokio::spawn(async move { r.load_resources("raw".into(), expected, deadline()).await })
+    };
+    loader.release.add_permits(2);
+    let loaded = runtime
+        .load_resources("raw".into(), expected, deadline())
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&loaded, &same.await.unwrap().unwrap()));
+    assert!(!Arc::ptr_eq(&loaded, &upgraded.await.unwrap().unwrap()));
+    assert!(dropped.load(Ordering::Relaxed));
+    assert_eq!(loader.calls.load(Ordering::Relaxed), 2);
 }
 #[tokio::test]
 async fn single_flight_full_identity_and_evicted_active_capacity() {

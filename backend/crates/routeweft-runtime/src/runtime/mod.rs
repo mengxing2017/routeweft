@@ -69,4 +69,6 @@ impl<L: Loader> Runtime<L> {
 }
 
 #[cfg(test)]
+mod resource_tests;
+#[cfg(test)]
 mod tests;
