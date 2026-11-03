@@ -7,6 +7,7 @@ pub(super) struct Chain {
     pub offset: usize,
     pub len: usize,
 }
+#[derive(Default)]
 pub(super) struct Compression {
     chains: Vec<Chain>,
     edges: Vec<usize>,

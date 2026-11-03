@@ -166,6 +166,11 @@ pub struct LoadDiagnostics {
     pub dataset_ms: f64,
     pub acceleration_ms: f64,
     pub index_ms: f64,
+    pub adjacency_ms: f64,
+    pub restrictions_ms: f64,
+    pub spatial_index_ms: f64,
+    pub components_ms: f64,
+    pub compression_ms: f64,
     pub weak_components: usize,
     pub strong_components: usize,
 }
@@ -202,35 +207,35 @@ impl Engine {
         let acceleration = crate::acceleration::load(path, &m, &g, options)?;
         let acceleration_ms = started.elapsed().as_secs_f64() * 1000.;
         let started = std::time::Instant::now();
-        let mut engine = Self::from_graph_with_options(m, g, options, capacity)?;
-        if let Some(index) = &acceleration {
-            engine.compression.set_boundaries(&engine.graph, index);
+        // Dataset::open has already authenticated and validated this graph.
+        let mut engine = Self::from_validated_graph(m, g, options, capacity)?;
+        if let Some(index) = acceleration {
+            engine.load_diagnostics.compression_ms = engine.install_acceleration(index);
         }
-        engine.acceleration = acceleration;
-        engine.load_diagnostics = LoadDiagnostics {
-            dataset_ms,
-            acceleration_ms,
-            index_ms: started.elapsed().as_secs_f64() * 1000.,
-            weak_components: engine.components.size.len(),
-            strong_components: engine.components.strong_count,
-        };
+        engine.load_diagnostics.dataset_ms = dataset_ms;
+        engine.load_diagnostics.acceleration_ms = acceleration_ms;
+        engine.load_diagnostics.index_ms = started.elapsed().as_secs_f64() * 1000.;
         Ok(engine)
     }
     pub fn from_graph(manifest: Manifest, graph: Graph) -> Result<Self, Error> {
-        Self::from_graph_with_options(
+        graph
+            .validate(LoadOptions::default())
+            .map_err(dataset_error)?;
+        Self::from_validated_graph(
             manifest,
             graph,
             LoadOptions::default(),
             routeweft_dataset::GraphCapacity::City,
         )
     }
-    fn from_graph_with_options(
+    /// Private entry point: callers must validate graph semantics first.
+    fn from_validated_graph(
         manifest: Manifest,
         graph: Graph,
         options: LoadOptions,
         capacity: routeweft_dataset::GraphCapacity,
     ) -> Result<Self, Error> {
-        graph.validate(options).map_err(dataset_error)?;
+        let index_started = std::time::Instant::now();
         let mut actual = manifest.clone();
         actual.nodes = graph.nodes.len();
         actual.edges = graph.edges.len();
@@ -263,8 +268,13 @@ impl Engine {
         }
         let cos_lat = ((min_lat + max_lat) / 2.).to_radians().cos();
         let project = |p: Point| [p.lon.to_radians() * R * cos_lat, p.lat.to_radians() * R];
+        let started = std::time::Instant::now();
         let incoming =
             crate::topology::Rows::new(graph.nodes.len(), graph.edges.iter().map(|e| e.to));
+        let outgoing = Adjacency::with_limits(graph.nodes.len(), &graph.edges, options)
+            .map_err(dataset_error)?;
+        let adjacency_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
         let restrictions = Restrictions::new(&graph.forbidden);
         let mut automata: HashMap<usize, Vec<usize>> = HashMap::new();
         for node in &restrictions.nodes {
@@ -277,9 +287,9 @@ impl Engine {
                 }
             }
         }
-        let outgoing = Adjacency::with_limits(graph.nodes.len(), &graph.edges, options)
-            .map_err(dataset_error)?;
-        let mut entries = Vec::new();
+        let restrictions_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
+        let mut entries = Vec::with_capacity(graph.edges.len());
         for (id, e) in graph.edges.iter().enumerate() {
             entries.push(Indexed {
                 id,
@@ -289,8 +299,21 @@ impl Engine {
                 ),
             });
         }
+        let index = RTree::bulk_load(entries);
+        let spatial_index_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
         let components = components::Components::new(&graph, &outgoing, &incoming);
-        let compression = compression::Compression::new(&graph, &outgoing, &incoming);
+        let components_ms = started.elapsed().as_secs_f64() * 1000.;
+        let load_diagnostics = LoadDiagnostics {
+            index_ms: index_started.elapsed().as_secs_f64() * 1000.,
+            adjacency_ms,
+            restrictions_ms,
+            spatial_index_ms,
+            components_ms,
+            weak_components: components.size.len(),
+            strong_components: components.strong_count,
+            ..Default::default()
+        };
         Ok(Self {
             graph,
             manifest,
@@ -298,13 +321,14 @@ impl Engine {
             incoming,
             automata,
             components,
-            compression,
-            index: RTree::bulk_load(entries),
+            // Only MLD search emits chain arcs. Dijkstra needs no compression.
+            compression: compression::Compression::default(),
+            index,
             cos_lat,
             local_projection: capacity == routeweft_dataset::GraphCapacity::Regional,
             restrictions,
             acceleration: None,
-            load_diagnostics: LoadDiagnostics::default(),
+            load_diagnostics,
         })
     }
     /// Build an in-memory metric for embedded use and differential tests.
@@ -312,9 +336,18 @@ impl Engine {
     pub fn customize(&mut self, options: CustomizationOptions) -> Result<AccelerationInfo, Error> {
         let index = Index::build(&self.graph, &self.outgoing, options)?;
         let info = index.info();
+        self.install_acceleration(index);
+        Ok(info)
+    }
+    fn install_acceleration(&mut self, index: Index) -> f64 {
+        let started = std::time::Instant::now();
+        if self.acceleration.is_none() {
+            self.compression =
+                compression::Compression::new(&self.graph, &self.outgoing, &self.incoming);
+        }
         self.compression.set_boundaries(&self.graph, &index);
         self.acceleration = Some(index);
-        Ok(info)
+        started.elapsed().as_secs_f64() * 1000.
     }
     /// `excluded` must be strictly sorted. Coverage inspection never changes routing.
     pub fn coverage(&self, excluded: &[i64]) -> Result<CoverageInfo, Error> {
