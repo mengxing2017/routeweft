@@ -68,6 +68,7 @@ struct Level {
     usable: Vec<bool>,
 }
 pub(crate) struct Index {
+    pub(crate) artifact_sha256: Option<String>,
     leaf: Vec<u32>,
     fanout: u32,
     boundary: Vec<u8>,
@@ -309,6 +310,7 @@ impl Index {
         }
         let leaf = partition::partition(graph, &topology, options.leaf_nodes, &mut ctx)?;
         let mut index = Self {
+            artifact_sha256: None,
             leaf,
             fanout: options.fanout as u32,
             boundary: vec![0; n],

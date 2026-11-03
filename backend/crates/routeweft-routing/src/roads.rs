@@ -384,6 +384,11 @@ impl Engine {
     pub fn load_diagnostics(&self) -> LoadDiagnostics {
         self.load_diagnostics
     }
+    /// SHA-256 of the complete loaded routing.mld file, including its checksum.
+    /// None for an absent artifact or a metric customized only in memory.
+    pub fn acceleration_sha256(&self) -> Option<&str> {
+        self.acceleration.as_ref()?.artifact_sha256.as_deref()
+    }
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }

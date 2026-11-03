@@ -179,6 +179,7 @@ impl Index {
         }
         let max_cell = *leaf.iter().max().ok_or(Error::InvalidDataset)?;
         let mut index = Self {
+            artifact_sha256: None,
             leaf,
             fanout,
             boundary: vec![0; n],
@@ -266,9 +267,15 @@ impl Index {
             return Err(Error::InvalidDataset);
         }
         let mut file = hashed.io.into_inner();
-        if hashed.hash.finalize().as_slice() != read::<32>(&mut file)? {
+        let trailer = read::<32>(&mut file)?;
+        let mut hash = hashed.hash;
+        if hash.clone().finalize().as_slice() != trailer {
             return Err(Error::InvalidDataset);
         }
+        // Retain the digest of the complete artifact (including its checksum)
+        // without rereading it for host cache identity verification.
+        hash.update(trailer);
+        index.artifact_sha256 = Some(format!("{:x}", hash.finalize()));
         index.rebuild_reverse();
         Ok(Some(index))
     }
