@@ -2,12 +2,14 @@
 //! Quotas and keepalive guards belong to actual blocking tasks, even when waiters disappear.
 mod config;
 mod error;
+mod identity;
 mod loader;
 mod resident;
 mod runtime;
 
 pub use config::{LoadConfig, QueryBudget, RuntimeConfig};
 pub use error::RuntimeError;
+pub use identity::EngineResourceIdentity;
 pub use loader::{EngineLoader, Loader};
 pub use resident::Resident;
 pub use runtime::Runtime;

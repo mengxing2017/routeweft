@@ -2,6 +2,7 @@
 mod loading;
 mod query;
 
+use crate::identity::CacheKey;
 use crate::{LoadConfig, Loader, QueryBudget, Resident, RuntimeConfig, RuntimeError};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Notify, OnceCell, Semaphore};
@@ -23,7 +24,7 @@ type LoadCell<T> = Arc<LoadEntry<T>>;
 
 pub struct Runtime<L: Loader> {
     loader: Arc<L>,
-    registry: Arc<Mutex<HashMap<String, LoadCell<L::Engine>>>>,
+    registry: Arc<Mutex<HashMap<CacheKey, LoadCell<L::Engine>>>>,
     resident: Arc<Semaphore>,
     loads: Arc<Semaphore>,
     queries: Arc<Semaphore>,

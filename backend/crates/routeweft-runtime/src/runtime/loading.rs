@@ -1,6 +1,7 @@
 //! Single-flight cached loading, staged validation and eviction.
 use super::{LoadEntry, Loaded, Runtime};
-use crate::{Loader, Resident, RuntimeError};
+use crate::identity::LoadIdentity;
+use crate::{EngineResourceIdentity, Loader, Resident, RuntimeError};
 use routeweft_dataset::DatasetIdentity;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
@@ -14,9 +15,34 @@ impl<L: Loader> Runtime<L> {
         deadline: Instant,
         file_lease: Arc<dyn Send + Sync>,
     ) -> Loaded<L::Engine> {
-        expected
-            .validate()
-            .map_err(|_| RuntimeError::InvalidDataset)?;
+        self.validate_inner(path, LoadIdentity::Dataset(expected), deadline, file_lease)
+            .await
+    }
+    /// Like validate_dataset, but authenticates the optional accelerator too.
+    /// This staging check deliberately does not populate the query cache.
+    pub async fn validate_resources(
+        &self,
+        path: PathBuf,
+        expected: EngineResourceIdentity,
+        deadline: Instant,
+        file_lease: Arc<dyn Send + Sync>,
+    ) -> Loaded<L::Engine> {
+        self.validate_inner(
+            path,
+            LoadIdentity::Resources(expected),
+            deadline,
+            file_lease,
+        )
+        .await
+    }
+    async fn validate_inner(
+        &self,
+        path: PathBuf,
+        expected: LoadIdentity,
+        deadline: Instant,
+        file_lease: Arc<dyn Send + Sync>,
+    ) -> Loaded<L::Engine> {
+        expected.validate()?;
         if Instant::now() >= deadline {
             return Err(RuntimeError::DeadlineExceeded);
         }
@@ -39,10 +65,7 @@ impl<L: Loader> Runtime<L> {
         let engine = tokio::task::spawn_blocking(move || {
             let _loading = loading;
             let _file_lease = file_lease;
-            let inner = loader.open(&path, &expected, limits)?;
-            if loader.identity(&inner) != expected {
-                return Err(RuntimeError::InvalidDataset);
-            }
+            let inner = expected.open(loader.as_ref(), &path, limits)?;
             Ok::<_, RuntimeError>(Arc::new(Resident {
                 inner,
                 _resident: resident,
@@ -72,14 +95,49 @@ impl<L: Loader> Runtime<L> {
         deadline: Instant,
         file_lease: Option<Arc<dyn Send + Sync>>,
     ) -> Loaded<L::Engine> {
-        expected
-            .validate()
-            .map_err(|_| RuntimeError::InvalidDataset)?;
+        self.load_inner(path, LoadIdentity::Dataset(expected), deadline, file_lease)
+            .await
+    }
+    /// Cache by base dataset plus exact MLD digest (or verified absence).
+    /// Use during publication/startup prewarming and subsequent queries with the
+    /// same trusted delivery identity. Old handles retain their resident quota.
+    pub async fn load_resources(
+        &self,
+        path: PathBuf,
+        expected: EngineResourceIdentity,
+        deadline: Instant,
+    ) -> Loaded<L::Engine> {
+        self.load_resources_with_lease(path, expected, deadline, None)
+            .await
+    }
+    pub async fn load_resources_with_lease(
+        &self,
+        path: PathBuf,
+        expected: EngineResourceIdentity,
+        deadline: Instant,
+        file_lease: Option<Arc<dyn Send + Sync>>,
+    ) -> Loaded<L::Engine> {
+        self.load_inner(
+            path,
+            LoadIdentity::Resources(expected),
+            deadline,
+            file_lease,
+        )
+        .await
+    }
+    async fn load_inner(
+        &self,
+        path: PathBuf,
+        expected: LoadIdentity,
+        deadline: Instant,
+        file_lease: Option<Arc<dyn Send + Sync>>,
+    ) -> Loaded<L::Engine> {
+        expected.validate()?;
         if Instant::now() >= deadline {
             return Err(RuntimeError::DeadlineExceeded);
         }
-        let key = expected.dataset_id.clone();
-        let expected_identity = expected.clone();
+        let key = expected.key();
+        let expected_identity = expected.dataset().clone();
         let cell = {
             let mut registry = self.registry.lock().await;
             if let Some(cell) = registry.get(&key) {
@@ -120,10 +178,7 @@ impl<L: Loader> Runtime<L> {
                     let result = tokio::task::spawn_blocking(move || {
                         let _loading = loading;
                         let _file_lease = file_lease;
-                        let engine = loader.open(&path, &expected, limits)?;
-                        if loader.identity(&engine) != expected {
-                            return Err(RuntimeError::InvalidDataset);
-                        }
+                        let engine = expected.open(loader.as_ref(), &path, limits)?;
                         Ok::<_, RuntimeError>(Arc::new(Resident {
                             inner: engine,
                             _resident: resident,
@@ -172,11 +227,6 @@ impl<L: Loader> Runtime<L> {
     pub async fn evict(&self, dataset_id: &str) {
         let mut registry = self.registry.lock().await;
         // Keep in-flight initialization discoverable until it completes.
-        if registry
-            .get(dataset_id)
-            .is_some_and(|entry| entry.result.get().is_some())
-        {
-            registry.remove(dataset_id);
-        }
+        registry.retain(|key, entry| key.dataset_id != dataset_id || entry.result.get().is_none());
     }
 }
