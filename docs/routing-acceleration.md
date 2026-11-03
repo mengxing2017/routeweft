@@ -4,7 +4,7 @@ RouteWeft 使用多级单元捷径缩小查询空间。采用 OSRM MLD 的分区
 
 ## 升级已有数据集
 
-先构建或安装新 CLI，再对不可变的数据集执行一次离线定制：
+先构建或安装新 CLI，将基础数据集复制到新的可写 staging 目录，再执行一次离线定制。完成验证后冻结并发布新目录；不要给已发布的不可变目录原地增补或重写加速文件：
 
 ```sh
 routeweft customize --dataset region/ --graph-capacity regional \
@@ -29,6 +29,8 @@ routeweft route --dataset region/ --graph-capacity regional \
 
 局部原图查询使用度二链压缩。链保存原始边序列和整数成本前缀；兼容道路属性才允许连接，限制端点及其邻接点保持显式，以保留合法掉头清除限制历史的行为。分区边界、吸附分割和全部途经点构成链的切断点，查询跨链跳跃后仍逐边恢复几何和引导。此处压缩在线查询拓扑，保留原始 graph、空间索引及吸附 ID，没有宣称缩小基础地图文件或消除原图常驻内存。
 
+压缩链只在加载 MLD 或首次内存定制成功时构建；无加速文件的 Dijkstra 引擎跳过这项初始化。再次内存定制复用链结构并刷新分区边界。磁盘加载复用 dataset 层已经完成的图语义校验；公开的 `Engine::from_graph` 仍独立校验调用者提供的图。
+
 弱连通分量始终可用，不同弱分量安全地返回 NoRoute；相同分量不代表有向可达。加载阶段也迭代计算强连通分量数量，但不会仅因 SCC 不同就拒绝路线。route 在最近候选没有共同弱分量时，对小于 1000 节点的小分量查找最大弱分量内的候选，仍受同一吸附半径约束，独立于普通 top-k 候选截断；成功回退记录 snap_fallbacks。如果所有途经点都能使用同一小分量，保留该分量。nearest 接口继续返回实际最近候选，不应用 route 的替代策略。
 
 选中捷径逐层解包为原始边，再使用已有几何和引导逻辑；等价最优路径可能采用不同几何，不保证与 Dijkstra 逐点相同。
@@ -43,6 +45,8 @@ routeweft serve --dataset region/ --graph-capacity regional \
 ```
 
 进程只加载一次。首行是 `status=ready`、dataset_id、load_ms、load_diagnostics 和加速器信息；随后 stdin 每行一个请求，stdout 每行一个响应，EOF 正常退出。请求串行处理，服务端可使用进程池；当前不提供 HTTP 或内置并发。嵌入式调用可直接复用 `Arc<Engine>`。
+
+使用 Tokio 宿主缓存时，基础 dataset_id 不随 MLD 增补或重定制改变。应使用 [`routeweft-runtime` 的资源身份接口](../backend/crates/routeweft-runtime/README.md)，将交付回执中的完整 MLD 文件摘要传给 `load_resources`，预热成功后切换发布身份。旧的 dataset-only 加载接口保留兼容行为，需要消费端显式迁移。`Engine::acceleration_sha256()` 返回实际加载文件的完整 SHA-256；缺少文件或仅内存定制时返回 None。
 
 ```json
 {"id":"route-1","operation":"route","coordinates":[{"lon":108.32,"lat":22.82},{"lon":109.12,"lat":21.48}]}
@@ -60,7 +64,7 @@ CLI 查询结果（含查询错误）增加 `diagnostics`：algorithm、elapsed_
 
 默认查询预算维持 work=2,000,000、states=250,000、queue=500,000、geometry=100,000、CLI timeout=10,000 ms，库不设默认时限。通过缩小搜索空间修复长距离失败，而不是自动无上限重试。达到限制仍明确失败。
 
-单次 CLI 的 `load_ms` 包含加载、图验证、加速器校验及索引构建；`load_diagnostics` 分为 dataset_ms、acceleration_ms、index_ms，另含 weak_components、strong_components。查询 elapsed_ms 不含这些启动步骤。JSON 编码、stdout/网络、消费者队列与进程启动耗时也不计入查询时限；外层应自行设置覆盖完整生命周期的时限。若需要比较查询本身，优先使用 serve 或同一个 Engine，不能将 CLI 总墙钟时间当作搜索时间。
+单次 CLI 的 `load_ms` 包含加载、图验证、加速器校验及索引构建；`load_diagnostics` 分为 dataset_ms、acceleration_ms、index_ms，另含 weak_components、strong_components。index_ms 内新增 adjacency_ms（入出向 CSR）、restrictions_ms（限制自动机及反向映射）、spatial_index_ms（边包围盒与 R-tree）、components_ms（强弱连通分析）、compression_ms（压缩链与 MLD 边界）；这些分项不含范围检查等少量公共开销。无 MLD 时 compression_ms 为 0。诊断描述引擎构建，不累加后续内存定制的时间。查询 elapsed_ms 不含这些启动步骤。JSON 编码、stdout/网络、消费者队列与进程启动耗时也不计入查询时限；外层应自行设置覆盖完整生命周期的时限。若需要比较查询本身，优先使用 serve 或同一个 Engine，不能将 CLI 总墙钟时间当作搜索时间。
 
 ## 加速文件 v2
 
