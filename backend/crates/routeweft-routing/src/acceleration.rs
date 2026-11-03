@@ -14,9 +14,10 @@ use std::path::Path;
 use std::time::Instant;
 
 pub const FILE_NAME: &str = "routing.mld";
+pub use storage::inspect_artifact;
 const MAX_LEVELS: usize = 4;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct CustomizationOptions {
     pub leaf_nodes: usize,
     pub fanout: usize,
@@ -26,7 +27,22 @@ pub struct CustomizationOptions {
     pub max_work: usize,
     /// Bounds logical accelerator/workspace allocations, not process RSS.
     pub max_bytes: u64,
+    #[serde(skip)]
     pub deadline: Option<Instant>,
+}
+impl CustomizationOptions {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.leaf_nodes < 2
+            || !(2..=32).contains(&self.fanout)
+            || !(1..=MAX_LEVELS).contains(&self.levels)
+            || self.max_boundary == 0
+            || self.max_boundary > 1024
+            || self.max_shortcuts > u32::MAX as usize
+        {
+            return Err(Error::InvalidInput);
+        }
+        Ok(())
+    }
 }
 impl Default for CustomizationOptions {
     fn default() -> Self {
@@ -258,39 +274,22 @@ impl Index {
         }
     }
     fn estimated_bytes(&self) -> u64 {
-        (self.leaf.len() as u64 * 9)
-            + self.topology.bytes()
-            + self
-                .levels
-                .iter()
-                .map(|l| {
-                    l.offsets.len() as u64 * 8 + l.arcs.len() as u64 * 32 + l.usable.len() as u64
-                })
-                .sum::<u64>()
+        self.allocation(0).map_or(u64::MAX, |a| a.resident_bytes)
+    }
+    fn allocation(&self, heap: u64) -> Result<crate::resources::MldAllocation, Error> {
+        let cells: Vec<_> = self.levels.iter().map(|l| l.usable.len() as u64).collect();
+        let shortcuts = self.levels.iter().map(|l| l.arcs.len() as u64).sum();
+        crate::resources::allocation(self.topology.counts(), &cells, shortcuts, heap)
     }
     pub(crate) fn build(
         graph: &Graph,
         _outgoing: &Adjacency,
         options: CustomizationOptions,
     ) -> Result<Self, Error> {
-        let original_n = graph.nodes.len();
-        let n = original_n;
-        if n == 0
-            || n > u32::MAX as usize
-            || options.leaf_nodes < 2
-            || !(2..=32).contains(&options.fanout)
-            || !(1..=MAX_LEVELS).contains(&options.levels)
-            || options.max_boundary == 0
-            || options.max_boundary > 1024
-            || options.max_shortcuts > u32::MAX as usize
-        {
+        let n = graph.nodes.len();
+        options.validate()?;
+        if n == 0 || n > u32::MAX as usize {
             return Err(Error::InvalidInput);
-        }
-        // Includes sorting keys, dense distances, touched nodes, heap, parents,
-        // all level offsets and conservative allocator/vector growth overhead.
-        let workspace = n as u64 * (128 + options.levels as u64 * 8) + graph.edges.len() as u64;
-        if workspace > options.max_bytes {
-            return Err(Error::BudgetExceeded);
         }
         let budget = SearchBudget {
             max_work: options.max_work,
@@ -298,16 +297,18 @@ impl Index {
             ..Default::default()
         };
         let mut ctx = Context::new(&budget, true);
-        let topology =
-            Topology::build(graph, &mut ctx, options.max_bytes.saturating_sub(workspace))?;
+        let topology = Topology::build(graph, &mut ctx, options.max_bytes)?;
         let n = topology.states.len();
         if n > u32::MAX as usize {
             return Err(Error::BudgetExceeded);
         }
-        let workspace = workspace + topology.bytes() + (n - original_n) as u64 * 160;
-        if workspace > options.max_bytes {
-            return Err(Error::BudgetExceeded);
-        }
+        let counts = topology.counts();
+        let level_cells = crate::resources::cells(counts, options);
+        let charge = |shortcuts, heap| -> Result<(), Error> {
+            let a = crate::resources::allocation(counts, &level_cells, shortcuts, heap)?;
+            crate::resources::check(a.customization_peak_bytes, options.max_bytes)
+        };
+        charge(0, 0)?;
         let leaf = partition::partition(graph, &topology, options.leaf_nodes, &mut ctx)?;
         let mut index = Self {
             artifact_sha256: None,
@@ -376,11 +377,10 @@ impl Index {
                     }
                     if node != source && index.boundary[node] as usize > level {
                         total_shortcuts += 1;
-                        if total_shortcuts > options.max_shortcuts
-                            || workspace + total_shortcuts as u64 * 32 > options.max_bytes
-                        {
+                        if total_shortcuts > options.max_shortcuts {
                             return Err(Error::BudgetExceeded);
                         }
+                        charge(total_shortcuts as u64, heap.len() as u64)?;
                         metric.arcs.push(Shortcut {
                             to: node as u32,
                             cost,
@@ -396,13 +396,7 @@ impl Index {
                             // Duplicate heap entries are possible with parallel
                             // edges. Bound their vector growth separately from
                             // the node-sized dense customization workspace.
-                            if workspace
-                                + total_shortcuts as u64 * 32
-                                + (heap.len() as u64 + 1) * 32
-                                > options.max_bytes
-                            {
-                                return Err(Error::BudgetExceeded);
-                            }
+                            charge(total_shortcuts as u64, heap.len() as u64 + 1)?;
                             if !reached[arc.to] {
                                 touched.push(arc.to);
                                 reached[arc.to] = true;
@@ -422,6 +416,10 @@ impl Index {
             index.levels.push(metric);
         }
         index.rebuild_reverse();
+        crate::resources::check(
+            index.allocation(0)?.customization_peak_bytes,
+            options.max_bytes,
+        )?;
         Ok(index)
     }
 

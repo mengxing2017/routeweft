@@ -18,6 +18,7 @@
 pub mod acceleration;
 mod diagnostics;
 pub mod geometry;
+pub mod resources;
 pub use diagnostics::{BudgetFailure, QueryDiagnostics, QueryOutcome, RoutingAlgorithm};
 
 use routeweft_domain::model::{Coordinate, TravelProfile};

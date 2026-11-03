@@ -41,6 +41,9 @@ pub(crate) struct Edge {
     pub cost: u64,
 }
 pub(crate) struct Topology {
+    physical_nodes: usize,
+    physical_edges: usize,
+    restriction_references: usize,
     pub states: Vec<(usize, usize)>,
     pub extras: Vec<Option<usize>>,
     pub edges: Vec<Edge>,
@@ -50,7 +53,23 @@ pub(crate) struct Topology {
 impl Topology {
     pub fn build(g: &Graph, ctx: &mut Context<'_, '_>, max_bytes: u64) -> Result<Self, Error> {
         ctx.tick()?;
+        let refs = g.forbidden.iter().map(Vec::len).sum::<usize>();
+        let mut charged = routeweft_dataset::TopologyBounds {
+            physical_nodes: g.nodes.len() as u64,
+            physical_edges: g.edges.len() as u64,
+            restriction_references: refs as u64,
+            states: g.nodes.len() as u64,
+            transitions: g.edges.len() as u64,
+        };
+        crate::resources::check(crate::resources::topology_bytes(charged)?, max_bytes)?;
         let restrictions = Restrictions::new(&g.forbidden);
+        charged.states += restrictions
+            .nodes
+            .iter()
+            .skip(1)
+            .filter(|n| !n.terminal)
+            .count() as u64;
+        crate::resources::check(crate::resources::topology_bytes(charged)?, max_bytes)?;
         let mut states: Vec<_> = (0..g.nodes.len()).map(|v| (v, 0)).collect();
         let mut extras = vec![None; restrictions.nodes.len()];
         for node in &restrictions.nodes {
@@ -75,9 +94,9 @@ impl Topology {
                     } else {
                         extras[b].ok_or(Error::InvalidGraph)?
                     };
-                    if states.len() as u64 * 64 + (edges.len() as u64 + 1) * 96 > max_bytes {
-                        return Err(Error::BudgetExceeded);
-                    }
+                    charged.states = states.len() as u64;
+                    charged.transitions = edges.len() as u64 + 1;
+                    crate::resources::check(crate::resources::topology_bytes(charged)?, max_bytes)?;
                     edges.push(Edge {
                         from,
                         to,
@@ -90,6 +109,9 @@ impl Topology {
         let outgoing = Rows::new(states.len(), edges.iter().map(|e| e.from));
         let incoming = Rows::new(states.len(), edges.iter().map(|e| e.to));
         Ok(Self {
+            physical_nodes: g.nodes.len(),
+            physical_edges: g.edges.len(),
+            restriction_references: refs,
             states,
             extras,
             edges,
@@ -109,6 +131,15 @@ impl Topology {
         }
     }
     pub fn bytes(&self) -> u64 {
-        self.states.len() as u64 * 32 + self.extras.len() as u64 * 16 + self.edges.len() as u64 * 48
+        crate::resources::topology_bytes(self.counts()).unwrap_or(u64::MAX)
+    }
+    pub fn counts(&self) -> routeweft_dataset::TopologyBounds {
+        routeweft_dataset::TopologyBounds {
+            physical_nodes: self.physical_nodes as u64,
+            physical_edges: self.physical_edges as u64,
+            restriction_references: self.restriction_references as u64,
+            states: self.states.len() as u64,
+            transitions: self.edges.len() as u64,
+        }
     }
 }

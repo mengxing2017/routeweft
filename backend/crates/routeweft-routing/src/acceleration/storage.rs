@@ -44,6 +44,138 @@ fn read64(r: &mut impl Read) -> Result<u64, Error> {
     Ok(u64::from_le_bytes(read(r)?))
 }
 
+/// Bounded file inspection, without constructing the routing-state topology.
+/// Scope intentionally excludes topology boundary semantics and metric optimality.
+pub fn inspect_artifact(
+    path: &Path,
+    manifest: &Manifest,
+    bounds: routeweft_dataset::TopologyBounds,
+    workspace: u64,
+) -> Result<Option<crate::resources::ArtifactPlan>, Error> {
+    let path = path.join(FILE_NAME);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Error::Io),
+    };
+    if !metadata.is_file() || metadata.len() < 116 {
+        return Err(Error::InvalidDataset);
+    }
+    let file = File::open(&path).map_err(io)?;
+    let mut reader = BufReader::new(Hashed {
+        io: file.take(metadata.len() - 32),
+        hash: Sha256::new(),
+    });
+    if &read::<8>(&mut reader)? != MAGIC {
+        return Err(Error::IncompatibleFormat);
+    }
+    if read::<64>(&mut reader)?.as_slice() != manifest.dataset_id.as_bytes() {
+        return Err(Error::InvalidDataset);
+    }
+    let n = read32(&mut reader)? as usize;
+    let fanout = read32(&mut reader)?;
+    let levels = read32(&mut reader)? as usize;
+    if n as u64 > bounds.states
+        || (n as u64) < bounds.physical_nodes
+        || n == 0
+        || !(2..=32).contains(&fanout)
+        || !(1..=MAX_LEVELS).contains(&levels)
+    {
+        return Err(Error::InvalidDataset);
+    }
+    let fixed = (n as u64 + 1)
+        .checked_mul(8)
+        .and_then(|v| v.checked_add(131072))
+        .ok_or(Error::BudgetExceeded)?;
+    crate::resources::check(fixed, workspace)?;
+    let mut leaf = Vec::with_capacity(n);
+    for _ in 0..n {
+        let cell = read32(&mut reader)?;
+        if cell as usize >= n {
+            return Err(Error::InvalidDataset);
+        }
+        leaf.push(cell);
+    }
+    let max_cell = *leaf.iter().max().ok_or(Error::InvalidDataset)?;
+    let mut cells = Vec::with_capacity(levels);
+    let mut shortcuts = Vec::with_capacity(levels);
+    for level in 0..levels {
+        let count = read32(&mut reader)? as usize;
+        let arcs = read32(&mut reader)? as usize;
+        let divisor = fanout.pow(level as u32);
+        if count != (max_cell / divisor) as usize + 1 {
+            return Err(Error::InvalidDataset);
+        }
+        crate::resources::check(
+            fixed
+                .checked_add(count as u64)
+                .ok_or(Error::BudgetExceeded)?,
+            workspace,
+        )?;
+        let mut usable = Vec::with_capacity(count);
+        for _ in 0..count {
+            let byte = read::<1>(&mut reader)?[0];
+            if byte > 1 {
+                return Err(Error::InvalidDataset);
+            }
+            usable.push(byte == 1);
+        }
+        let mut offsets = Vec::with_capacity(n + 1);
+        for _ in 0..=n {
+            let offset = read32(&mut reader)?;
+            if offset as usize > arcs || offsets.last().is_some_and(|&v| v > offset) {
+                return Err(Error::InvalidDataset);
+            }
+            // A u32 per offset is covered by fixed, even on 64-bit hosts.
+            offsets.push(offset);
+        }
+        if offsets[0] != 0 || offsets[n] as usize != arcs {
+            return Err(Error::InvalidDataset);
+        }
+        for from in 0..n {
+            for _ in offsets[from]..offsets[from + 1] {
+                let to = read32(&mut reader)? as usize;
+                let cost = read64(&mut reader)?;
+                if to >= n
+                    || to == from
+                    || cost == 0
+                    || leaf[from] / divisor != leaf[to] / divisor
+                    || !usable[(leaf[from] / divisor) as usize]
+                {
+                    return Err(Error::InvalidDataset);
+                }
+            }
+        }
+        cells.push(count as u64);
+        shortcuts.push(arcs as u64);
+    }
+    if reader.read(&mut [0; 1]).map_err(io)? != 0 {
+        return Err(Error::InvalidDataset);
+    }
+    let hashed = reader.into_inner();
+    if hashed.io.limit() != 0 {
+        return Err(Error::InvalidDataset);
+    }
+    let mut file = hashed.io.into_inner();
+    let trailer = read::<32>(&mut file)?;
+    let mut hash = hashed.hash;
+    if hash.clone().finalize().as_slice() != trailer {
+        return Err(Error::InvalidDataset);
+    }
+    hash.update(trailer);
+    Ok(Some(crate::resources::ArtifactPlan {
+        format: "RWFTML02",
+        sha256: format!("{:x}", hash.finalize()),
+        bytes: metadata.len(),
+        states: n as u64,
+        fanout,
+        cells,
+        shortcuts,
+        verification_scope: "checksum_layout_base_binding_not_topology_or_metric",
+        customization_provenance: "not_persisted_in_rwftml02_use_customization_receipt",
+    }))
+}
+
 impl Index {
     pub(super) fn save(&self, path: &Path, manifest: &Manifest) -> Result<(), Error> {
         if manifest.dataset_id.len() != 64 {
@@ -208,6 +340,18 @@ impl Index {
             if cells != (max_cell / fanout.pow(level as u32)) as usize + 1 {
                 return Err(Error::InvalidDataset);
             }
+            let mut all_cells: Vec<_> =
+                index.levels.iter().map(|l| l.usable.len() as u64).collect();
+            all_cells.push(cells as u64);
+            let all_arcs = index
+                .levels
+                .iter()
+                .map(|l| l.arcs.len() as u64)
+                .sum::<u64>()
+                + arcs as u64;
+            let requirement =
+                crate::resources::allocation(index.topology.counts(), &all_cells, all_arcs, 0)?;
+            crate::resources::check(requirement.load_peak_bytes, remaining)?;
             charge(
                 &mut charged,
                 cells as u64 + (n as u64 + 1) * 8 + arcs as u64 * 32,
@@ -277,6 +421,7 @@ impl Index {
         hash.update(trailer);
         index.artifact_sha256 = Some(format!("{:x}", hash.finalize()));
         index.rebuild_reverse();
+        crate::resources::check(index.allocation(0)?.load_peak_bytes, remaining)?;
         Ok(Some(index))
     }
 }
