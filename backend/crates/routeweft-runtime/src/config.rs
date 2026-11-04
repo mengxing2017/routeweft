@@ -43,6 +43,10 @@ impl QueryBudget {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeConfig {
+    /// Host's process-wide logical routing budget. None preserves legacy count-only admission.
+    pub memory_budget_bytes: Option<u64>,
+    /// Reserved per executing query, including result construction; not an RSS limit.
+    pub query_workspace_bytes: u64,
     pub resident_datasets: usize,
     pub parallel_loads: usize,
     pub parallel_queries: usize,
@@ -54,6 +58,8 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            memory_budget_bytes: None,
+            query_workspace_bytes: 256 * 1024 * 1024,
             resident_datasets: 1,
             parallel_loads: 1,
             parallel_queries: 1,

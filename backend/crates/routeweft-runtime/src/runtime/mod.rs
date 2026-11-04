@@ -23,6 +23,8 @@ impl<T> Default for LoadEntry<T> {
 type LoadCell<T> = Arc<LoadEntry<T>>;
 
 pub struct Runtime<L: Loader> {
+    memory: Arc<crate::MemoryBudget>,
+    query_workspace_bytes: u64,
     loader: Arc<L>,
     registry: Arc<Mutex<HashMap<CacheKey, LoadCell<L::Engine>>>>,
     resident: Arc<Semaphore>,
@@ -36,6 +38,8 @@ pub struct Runtime<L: Loader> {
 impl<L: Loader> Clone for Runtime<L> {
     fn clone(&self) -> Self {
         Self {
+            memory: self.memory.clone(),
+            query_workspace_bytes: self.query_workspace_bytes,
             loader: self.loader.clone(),
             registry: self.registry.clone(),
             resident: self.resident.clone(),
@@ -50,7 +54,21 @@ impl<L: Loader> Clone for Runtime<L> {
 }
 impl<L: Loader> Runtime<L> {
     pub fn new(loader: Arc<L>, config: RuntimeConfig) -> Self {
+        let memory = crate::MemoryBudget::new(config.memory_budget_bytes);
+        Self::with_memory_budget(loader, config, memory)
+    }
+    /// The supplied pool is authoritative; config.memory_budget_bytes is ignored.
+    /// Share it across loader types and runtime instances for process-wide admission.
+    pub fn with_memory_budget(
+        loader: Arc<L>,
+        config: RuntimeConfig,
+        memory: Arc<crate::MemoryBudget>,
+    ) -> Self {
         Self {
+            memory,
+            query_workspace_bytes: config
+                .query_workspace_bytes
+                .max(loader.minimum_query_workspace_bytes(config.query)),
             loader,
             registry: Arc::default(),
             resident: Arc::new(Semaphore::new(config.resident_datasets)),
@@ -65,6 +83,10 @@ impl<L: Loader> Runtime<L> {
             query_limits: config.query,
             queue_timeout: config.queue_timeout,
         }
+    }
+    /// Logical reservations across cached, staged and active engines and tasks.
+    pub fn memory_usage(&self) -> crate::MemoryUsage {
+        self.memory.usage()
     }
 }
 

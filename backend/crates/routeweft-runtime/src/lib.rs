@@ -4,12 +4,14 @@ mod config;
 mod error;
 mod identity;
 mod loader;
+mod memory;
 mod resident;
 mod runtime;
 
 pub use config::{LoadConfig, QueryBudget, RuntimeConfig};
 pub use error::RuntimeError;
-pub use identity::EngineResourceIdentity;
-pub use loader::{EngineLoader, Loader};
+pub use identity::{EngineResourceIdentity, PagedResourceIdentity};
+pub use loader::{EngineLoader, Loader, PagedEngineLoader};
+pub use memory::{MemoryBudget, MemoryRequirements, MemoryUsage};
 pub use resident::Resident;
 pub use runtime::Runtime;

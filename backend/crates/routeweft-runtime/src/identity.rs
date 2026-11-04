@@ -11,6 +11,24 @@ pub struct EngineResourceIdentity {
     pub dataset: DatasetIdentity,
     pub mld_sha256: Option<String>,
 }
+/// Trusted delivery identity for the explicit paged backend. It occupies a
+/// separate cache namespace from resident engines, including legacy loads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagedResourceIdentity {
+    pub dataset: DatasetIdentity,
+    pub query_index_sha256: String,
+}
+impl PagedResourceIdentity {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        self.dataset
+            .validate()
+            .map_err(|_| RuntimeError::InvalidDataset)?;
+        if self.dataset.format != 2 || !is_digest(&self.query_index_sha256) {
+            return Err(RuntimeError::InvalidDataset);
+        }
+        Ok(())
+    }
+}
 impl EngineResourceIdentity {
     pub fn validate(&self) -> Result<(), RuntimeError> {
         self.dataset
@@ -35,17 +53,20 @@ pub(crate) struct CacheKey {
 pub(crate) enum ResourceKey {
     Legacy,
     Exact(Option<String>),
+    Paged(String),
 }
 
 pub(crate) enum LoadIdentity {
     Dataset(DatasetIdentity),
     Resources(EngineResourceIdentity),
+    Paged(PagedResourceIdentity),
 }
 impl LoadIdentity {
     pub fn dataset(&self) -> &DatasetIdentity {
         match self {
             Self::Dataset(identity) => identity,
             Self::Resources(identity) => &identity.dataset,
+            Self::Paged(identity) => &identity.dataset,
         }
     }
     pub fn validate(&self) -> Result<(), RuntimeError> {
@@ -54,6 +75,7 @@ impl LoadIdentity {
                 .validate()
                 .map_err(|_| RuntimeError::InvalidDataset),
             Self::Resources(identity) => identity.validate(),
+            Self::Paged(identity) => identity.validate(),
         }
     }
     pub fn key(&self) -> CacheKey {
@@ -62,6 +84,7 @@ impl LoadIdentity {
             resources: match self {
                 Self::Dataset(_) => ResourceKey::Legacy,
                 Self::Resources(identity) => ResourceKey::Exact(identity.mld_sha256.clone()),
+                Self::Paged(identity) => ResourceKey::Paged(identity.query_index_sha256.clone()),
             },
         }
     }
@@ -74,6 +97,7 @@ impl LoadIdentity {
         let engine = match self {
             Self::Dataset(identity) => loader.open(path, identity, config),
             Self::Resources(identity) => loader.open_resources(path, identity, config),
+            Self::Paged(identity) => loader.open_paged_resources(path, identity, config),
         }?;
         if loader.identity(&engine) != *self.dataset() {
             return Err(RuntimeError::InvalidDataset);

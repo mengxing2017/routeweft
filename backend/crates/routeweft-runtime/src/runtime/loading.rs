@@ -46,7 +46,7 @@ impl<L: Loader> Runtime<L> {
         if Instant::now() >= deadline {
             return Err(RuntimeError::DeadlineExceeded);
         }
-        if self.resident.available_permits() == 0 {
+        if self.resident.available_permits() == 0 || self.memory.usage().limit_bytes.is_some() {
             let mut registry = self.registry.lock().await;
             registry.retain(|_, cell| !matches!(cell.result.get(), Some(Ok(engine)) if Arc::strong_count(engine) == 1));
         }
@@ -62,12 +62,22 @@ impl<L: Loader> Runtime<L> {
             .map_err(|_| RuntimeError::Overloaded)?;
         let loader = self.loader.clone();
         let limits = self.load_limits;
+        let mut memory = self
+            .memory
+            .reserve(self.loader.planning_workspace_bytes())?;
         let engine = tokio::task::spawn_blocking(move || {
             let _loading = loading;
-            let _file_lease = file_lease;
+            let requirements = loader.memory_requirements(&path, limits)?;
+            if requirements.resident_bytes > requirements.load_peak_bytes {
+                return Err(RuntimeError::Internal);
+            }
+            memory.resize(requirements.load_peak_bytes)?;
             let inner = expected.open(loader.as_ref(), &path, limits)?;
+            memory.resize(requirements.resident_bytes)?;
             Ok::<_, RuntimeError>(Arc::new(Resident {
                 inner,
+                _file_lease: Some(file_lease),
+                _memory: memory,
                 _resident: resident,
             }))
         })
@@ -145,6 +155,9 @@ impl<L: Loader> Runtime<L> {
             } else {
                 // Evict an idle completed entry when the bounded cache is full.
                 // Active queries retain their admission permit after eviction.
+                if self.memory.usage().limit_bytes.is_some() {
+                    registry.retain(|_, cell| !matches!(cell.result.get(), Some(Ok(engine)) if Arc::strong_count(engine) == 1));
+                }
                 if self.resident.available_permits() == 0 {
                     let victim = registry.iter().find_map(|(key, cell)| {
                         cell.result.get().and_then(|result| match result {
@@ -169,6 +182,9 @@ impl<L: Loader> Runtime<L> {
                     .try_acquire_owned()
                     .map_err(|_| RuntimeError::Overloaded)?;
                 let cell = Arc::new(LoadEntry::default());
+                let mut memory = self
+                    .memory
+                    .reserve(self.loader.planning_workspace_bytes())?;
                 registry.insert(key.clone(), cell.clone());
                 let runtime = self.clone();
                 let target = cell.clone();
@@ -177,10 +193,17 @@ impl<L: Loader> Runtime<L> {
                     let limits = runtime.load_limits;
                     let result = tokio::task::spawn_blocking(move || {
                         let _loading = loading;
-                        let _file_lease = file_lease;
+                        let requirements = loader.memory_requirements(&path, limits)?;
+                        if requirements.resident_bytes > requirements.load_peak_bytes {
+                            return Err(RuntimeError::Internal);
+                        }
+                        memory.resize(requirements.load_peak_bytes)?;
                         let engine = expected.open(loader.as_ref(), &path, limits)?;
+                        memory.resize(requirements.resident_bytes)?;
                         Ok::<_, RuntimeError>(Arc::new(Resident {
                             inner: engine,
+                            _file_lease: file_lease,
+                            _memory: memory,
                             _resident: resident,
                         }))
                     })
@@ -228,5 +251,28 @@ impl<L: Loader> Runtime<L> {
         let mut registry = self.registry.lock().await;
         // Keep in-flight initialization discoverable until it completes.
         registry.retain(|key, entry| key.dataset_id != dataset_id || entry.result.get().is_none());
+    }
+}
+
+impl<L: Loader> Runtime<L> {
+    pub async fn load_paged_resources(
+        &self,
+        path: PathBuf,
+        expected: crate::PagedResourceIdentity,
+        deadline: Instant,
+        file_lease: Option<Arc<dyn Send + Sync>>,
+    ) -> Loaded<L::Engine> {
+        self.load_inner(path, LoadIdentity::Paged(expected), deadline, file_lease)
+            .await
+    }
+    pub async fn validate_paged_resources(
+        &self,
+        path: PathBuf,
+        expected: crate::PagedResourceIdentity,
+        deadline: Instant,
+        file_lease: Arc<dyn Send + Sync>,
+    ) -> Loaded<L::Engine> {
+        self.validate_inner(path, LoadIdentity::Paged(expected), deadline, file_lease)
+            .await
     }
 }

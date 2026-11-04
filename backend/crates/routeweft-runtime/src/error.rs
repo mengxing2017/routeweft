@@ -3,6 +3,10 @@ use routeweft_routing::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeError {
+    MemoryBudgetExceeded {
+        requested_bytes: u64,
+        available_bytes: u64,
+    },
     Overloaded,
     DeadlineExceeded,
     InvalidDataset,
