@@ -55,3 +55,5 @@ identity.json 保存基准脚本与二进制 SHA-256、version/build、manifest�
 进程交互按一问一答复用同一引擎；ready/响应墙钟期限、16 MiB 单行、每进程输出额度（默认 128 MiB）和 1 MiB stderr 上限防止协议卡死或无界捕获。失败会终止并回收子进程，保留已有证据；不会在失败后静默重试。会话正常结束发送 EOF 并检查退出状态及额外输出。
 
 serve 的 ready 增加 graph_sha256、profile、acceleration_sha256 和 effective_query_limits。旧包络和逐查询格式保持兼容。宿主实现独立会话适配时，资源许可必须覆盖进程整个存活期，不能只覆盖启动命令。
+
+按需存储、runtime 字节准入与实际引擎 PID 内存验收参见[按需查询与内存所有权](paged-routing.md)。
