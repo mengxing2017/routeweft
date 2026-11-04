@@ -5,11 +5,13 @@ import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import selectors
 import subprocess
 import sys
 import time
+import threading
 
 
 def digest(path):
@@ -28,21 +30,79 @@ def percentile(values, fraction):
     return sorted(values)[math.ceil(len(values) * fraction) - 1] if values else None
 
 
+class MemoryMonitor:
+    """Linux /proc observations of the actual Popen engine PID, never its parent."""
+    def __init__(self, process, interval_ms):
+        self.process = process
+        self.interval_ms = interval_ms
+        self.started = time.monotonic()
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+        self.data = {'pid': process.pid, 'scope': 'direct_engine_process_excludes_children_and_benchmark',
+                     'platform': platform.system(), 'kernel': platform.release(), 'unit': 'KiB',
+                     'method': 'linux_proc_status_VmRSS_VmHWM_RssAnon_RssFile_RssShmem',
+                     'interval_ms': interval_ms, 'timeline_limit': 4096, 'timeline': [],
+                     'ready_pid_verified': False,
+                     'observations': 0, 'dropped_timeline_samples': 0, 'read_failures': 0,
+                     'peak_rss_kib': None, 'ready_rss_kib': None, 'after_measurement_rss_kib': None}
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def snapshot(self, phase='sampling'):
+        try:
+            if platform.system() != 'Linux':
+                return
+            values = {}
+            for line in Path(f'/proc/{self.process.pid}/status').read_text().splitlines():
+                key, _, value = line.partition(':')
+                if key in ('VmRSS', 'VmHWM', 'RssAnon', 'RssFile', 'RssShmem'):
+                    values[key] = int(value.split()[0])
+            if 'VmRSS' not in values or 'VmHWM' not in values:
+                return
+            with self.lock:
+                self.data['observations'] += 1
+                peak = max(values['VmRSS'], values['VmHWM'])
+                self.data['peak_rss_kib'] = max(self.data['peak_rss_kib'] or 0, peak)
+                if phase in ('ready', 'after_measurement'):
+                    self.data[f'{phase}_rss_kib'] = values['VmRSS']
+                sample = {'elapsed_ms': (time.monotonic() - self.started) * 1000,
+                          'phase': phase, **values}
+                if len(self.data['timeline']) < self.data['timeline_limit']:
+                    self.data['timeline'].append(sample)
+                else:
+                    self.data['dropped_timeline_samples'] += 1
+        except (OSError, ValueError, IndexError):
+            with self.lock:
+                self.data['read_failures'] += 1
+
+    def run(self):
+        while not self.stop_event.is_set() and self.process.poll() is None:
+            self.snapshot()
+            self.stop_event.wait(self.interval_ms / 1000)
+
+    def stop(self):
+        self.stop_event.set()
+        self.thread.join(timeout=2)
+
+
 class Resident:
     """Serial session with bounded lines, output and wall time."""
-    def __init__(self, command, evidence, max_output_bytes):
+    def __init__(self, command, evidence, max_output_bytes, memory_sample_ms=50):
         self.command = command
         self.evidence = evidence
         self.remaining = max_output_bytes
         self.buffer = bytearray()
         self.stderr = bytearray()
         self.process = None
+        self.memory_sample_ms = memory_sample_ms
+        self.memory = None
         self.selector = selectors.DefaultSelector()
 
     def __enter__(self):
         self.started = time.monotonic()
         self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.memory = MemoryMonitor(self.process, self.memory_sample_ms)
         self.selector.register(self.process.stdout, selectors.EVENT_READ, 'stdout')
         self.selector.register(self.process.stderr, selectors.EVENT_READ, 'stderr')
         return self
@@ -132,6 +192,8 @@ class Resident:
                 self.process.wait(timeout=5)
             raise
         finally:
+            if self.memory is not None:
+                self.memory.stop()
             if self.buffer:
                 self.evidence.write(self.buffer)
                 self.evidence.flush()
@@ -153,7 +215,7 @@ def validate_record(record, expected_id):
     for field in ('work', 'states'):
         if type(diagnostics.get(field)) is not int or diagnostics[field] < 0:
             raise RuntimeError(f'missing or invalid {field} diagnostic')
-    if diagnostics.get('algorithm') not in ('dijkstra', 'mld'):
+    if diagnostics.get('algorithm') not in ('dijkstra', 'mld', 'astar'):
         raise RuntimeError('missing or invalid actual algorithm')
     if record['status'] == 'ok':
         route = record.get('route', {})
@@ -172,8 +234,17 @@ def parse_args(argv):
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--warmup', type=int, default=0, help='rounds excluded from percentiles')
     parser.add_argument('--baseline-max-states', type=int, default=8_000_000)
+    parser.add_argument('--baseline-max-load-bytes', type=int, help='separate offline oracle load budget; default: max-load-bytes')
     parser.add_argument('--require-mld', action='store_true')
     parser.add_argument('--require-reachable', action='store_true')
+    parser.add_argument('--storage', choices=['resident', 'paged'], default='resident')
+    parser.add_argument('--page-cache-bytes', type=int, default=16 * 1024**2)
+    parser.add_argument('--query-workspace-bytes', type=int, default=256 * 1024**2)
+    parser.add_argument('--max-plan-workspace-bytes', type=int, default=64 * 1024**2)
+    parser.add_argument('--memory-sample-ms', type=int, choices=range(5, 1001), default=50, metavar='5-1000')
+    parser.add_argument('--max-query-read-mib', type=float, help='auto per-query application cache-miss reads, including warmup; requires phase diagnostics')
+    parser.add_argument('--max-peak-rss-mib', type=float, help='auto engine process VmHWM/RSS ceiling')
+    parser.add_argument('--max-steady-rss-mib', type=float, help='auto RSS immediately after measured requests')
     for name in ('max-load-ms', 'max-ready-ms', 'max-p95-ms', 'max-p99-ms', 'max-client-p95-ms'):
         parser.add_argument(f'--{name}', type=float)
     parser.add_argument('--max-work', type=int, help='auto observed-work acceptance ceiling')
@@ -187,11 +258,11 @@ def parse_args(argv):
     if not 1 <= args.baseline_max_states <= 16_000_000:
         parser.error('baseline-max-states must be 1-16000000')
     for name, value in vars(args).items():
-        if name.startswith('max_') or name.endswith('_seconds'):
+        if name.startswith('max_') or name.endswith('_seconds') or name in ('baseline_max_load_bytes', 'page_cache_bytes', 'query_workspace_bytes'):
             if value is not None and (not math.isfinite(value) or value <= 0):
                 parser.error(f'{name} must be finite and positive')
     policies = ('max_load_ms', 'max_ready_ms', 'max_p95_ms', 'max_p99_ms',
-                'max_client_p95_ms', 'max_work', 'max_states')
+                'max_client_p95_ms', 'max_work', 'max_states', 'max_peak_rss_mib', 'max_steady_rss_mib', 'max_query_read_mib')
     if args.mode == 'acceptance' and not (args.require_mld or args.require_reachable or any(
             getattr(args, name) is not None for name in policies)):
         parser.error('acceptance requires an explicit algorithm, reachability or performance policy')
@@ -248,6 +319,7 @@ def main(argv=None):
                     'version': json.loads(subprocess.check_output([str(binary), 'version', '--json'], timeout=10)),
                     'manifest': json.loads((args.dataset / 'manifest.json').read_text()),
                     'mld_sha256': digest(artifact) if artifact.exists() else None,
+                    'query_index_sha256': digest(args.dataset / 'query.idx') if args.storage == 'paged' else None,
                     'samples_sha256': args.samples_sha256,
                     'pairs_sha256': hashlib.sha256(json.dumps(pairs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
         write_json(args.output / 'identity.json', identity)
@@ -258,19 +330,33 @@ def main(argv=None):
         for algorithm in ['dijkstra', 'auto']:
             command = [str(binary), 'serve', '--dataset', str(args.dataset),
                        '--graph-capacity', args.graph_capacity,
-                       '--max-load-bytes', str(args.max_load_bytes), '--algorithm', algorithm]
+                       '--max-load-bytes', str((args.baseline_max_load_bytes or args.max_load_bytes) if algorithm == 'dijkstra' else args.max_load_bytes), '--algorithm', algorithm]
             if algorithm == 'dijkstra':
                 command += ['--max-work', '40000000', '--max-states', str(args.baseline_max_states),
                             '--max-queue', '4000000', '--timeout-ms', '60000']
+            if algorithm == 'auto' and args.storage == 'paged':
+                command += ['--storage', 'paged', '--page-cache-bytes', str(args.page_cache_bytes),
+                            '--query-workspace-bytes', str(args.query_workspace_bytes),
+                            '--max-plan-workspace-bytes', str(args.max_plan_workspace_bytes),
+                            '--query-index-sha256', identity['query_index_sha256']]
             records, warmups, client_times = [], [], []
             receipt = {'command': command, 'records': records, 'warmup_records': warmups, 'client_times_ms': client_times}
             session = None
             try:
                 with (args.output / f'{algorithm}.jsonl').open('wb') as evidence, Resident(
-                        command, evidence, args.max_output_bytes) as session:
+                        command, evidence, args.max_output_bytes, args.memory_sample_ms) as session:
                     ready = session.read(args.ready_timeout_seconds)
                     ready_ms = (time.monotonic() - session.started) * 1000
                     receipt.update(ready=ready, ready_wall_ms=ready_ms)
+                    session.memory.snapshot('ready')
+                    session.memory.data['ready_pid_verified'] = ready.get('pid') == session.process.pid
+                    if (args.max_peak_rss_mib is not None or args.max_steady_rss_mib is not None) and not session.memory.data['ready_pid_verified']:
+                        raise RuntimeError('memory acceptance requires ready.pid matching the actual engine process')
+                    if ready.get('pid', session.process.pid) != session.process.pid:
+                        raise RuntimeError('ready PID does not match the actual engine process')
+                    if algorithm == 'auto' and args.storage == 'paged' and (
+                            ready.get('storage') != 'paged' or ready.get('query_index_sha256') != identity['query_index_sha256']):
+                        fail('paged_backend_or_index_identity_mismatch')
                     if ready.get('schema') != 1 or ready.get('status') != 'ready' or ready.get('dataset_id') != identity['manifest']['dataset_id']:
                         raise RuntimeError('unexpected resident ready identity')
                     if ready.get('graph_sha256', identity['manifest']['graph_sha256']) != identity['manifest']['graph_sha256']:
@@ -298,6 +384,15 @@ def main(argv=None):
                                 record, wall_ms = session.request({'id': request_id, 'coordinates': points}, args.response_timeout_seconds)
                                 validate_record(record, request_id)
                                 target.append(record)
+                                if algorithm == 'auto' and args.max_query_read_mib is not None:
+                                    phases = record['diagnostics'].get('phases')
+                                    if not isinstance(phases, list) or not phases or any(not isinstance(p, dict) or type(p.get('cache_bytes_read')) is not int or p['cache_bytes_read'] < 0 for p in phases):
+                                        fail('query_read_measurement_unavailable', id=request_id)
+                                    else:
+                                        observed = sum(p['cache_bytes_read'] for p in phases)
+                                        if observed > args.max_query_read_mib * 1024**2:
+                                            fail('threshold_exceeded', metric='query_read_bytes', id=request_id,
+                                                 observed=observed, limit_bytes=args.max_query_read_mib * 1024**2)
                                 if algorithm == 'dijkstra' and record['diagnostics']['algorithm'] != 'dijkstra':
                                     fail('oracle_algorithm_mismatch', id=request_id)
                                 if phase == 'measured':
@@ -308,12 +403,15 @@ def main(argv=None):
                                     fail('reachable_route_required', algorithm=algorithm, id=request_id)
                     receipt.update(process_seconds=time.monotonic() - session.started,
                                    stderr=session.stderr.decode(errors='replace'))
+                    session.memory.snapshot('after_measurement')
                 if session.buffer:
                     raise RuntimeError('unexpected extra resident output')
             finally:
                 if session is not None:
                     receipt['stderr'] = session.stderr.decode(errors='replace')
                     receipt['process_seconds'] = time.monotonic() - session.started
+                    if session.memory is not None:
+                        receipt['memory'] = session.memory.data
                 write_json(args.output / f'{algorithm}.json', receipt)
             outcomes[algorithm] = records
             elapsed = [r['diagnostics']['elapsed_ms'] for r in records]
@@ -327,6 +425,7 @@ def main(argv=None):
                 'effective_query_limits': receipt['ready'].get('effective_query_limits'),
                 'max_states': max(r['diagnostics']['states'] for r in records),
                 'max_work': max(r['diagnostics']['work'] for r in records)}
+            summary[algorithm]['memory'] = {k: v for k, v in receipt.get('memory', {}).items() if k != 'timeline'}
             for r in warmups:
                 if r['status'] != 'ok' and r.get('error', {}).get('kind') != 'NoRoute':
                     fail('warmup_failed', algorithm=algorithm, id=r['id'])
@@ -359,6 +458,16 @@ def main(argv=None):
                 observed = summary['auto'][field]
                 if not isinstance(observed, (int, float)) or not math.isfinite(observed) or observed > limit:
                     fail('threshold_exceeded', metric=field, observed=observed, limit=limit)
+        for argument, field in [('max_peak_rss_mib', 'peak_rss_kib'), ('max_steady_rss_mib', 'after_measurement_rss_kib')]:
+            limit = getattr(args, argument)
+            if limit is not None:
+                observed = summary['auto']['memory'].get(field)
+                if observed is None:
+                    fail('memory_measurement_unavailable', metric=field)
+                elif observed > limit * 1024:
+                    fail('threshold_exceeded', metric=field, observed=observed, limit_kib=limit * 1024)
+        if args.storage == 'paged' and digest(args.dataset / 'query.idx') != identity['query_index_sha256']:
+            fail('query_index_changed_during_benchmark')
         if digest(Path(__file__)) != identity['benchmark_sha256'] or digest(args.pairs) != identity['samples_sha256'] or digest(binary) != identity['binary_sha256'] or json.loads((args.dataset / 'manifest.json').read_text()) != identity['manifest'] or (
                 digest(artifact) if artifact.exists() else None) != identity['mld_sha256']:
             fail('inputs_changed_during_benchmark')
