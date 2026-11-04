@@ -19,7 +19,10 @@ pub mod acceleration;
 mod diagnostics;
 pub mod geometry;
 pub mod resources;
-pub use diagnostics::{BudgetFailure, QueryDiagnostics, QueryOutcome, RoutingAlgorithm};
+pub use diagnostics::{
+    BudgetFailure, PagedWorkspaceUsage, QueryDiagnostics, QueryOutcome, QueryPhase,
+    RoutingAlgorithm,
+};
 
 use routeweft_domain::model::{Coordinate, TravelProfile};
 use std::cmp::Reverse;

@@ -1,5 +1,6 @@
 mod components;
 mod compression;
+mod recovery;
 mod sampling;
 mod search;
 use crate::acceleration::{AccelerationInfo, CustomizationOptions, Index, Link};
@@ -587,6 +588,14 @@ impl Engine {
                 }
             }
         }
+        self.route_matched(&matches, ctx, acceleration)
+    }
+    fn route_matched(
+        &self,
+        matches: &[Vec<Nearest>],
+        ctx: &mut Context<'_, '_>,
+        acceleration: Option<&Index>,
+    ) -> Result<RouteResult, Error> {
         for pair in matches.windows(2) {
             if !pair[0].iter().any(|a| {
                 pair[1]
@@ -604,10 +613,10 @@ impl Engine {
                     .flat_map(|m| [m.from, m.to].into_iter()),
             )
         });
-        let overlay = Overlay::new(&self.graph, &matches);
+        let overlay = Overlay::new(&self.graph, matches);
         ctx.phase("search");
         if let Some(index) = acceleration {
-            return self.search_accelerated(&matches, &overlay, index, open.as_ref().unwrap(), ctx);
+            return self.search_accelerated(matches, &overlay, index, open.as_ref().unwrap(), ctx);
         }
         let mut distances: HashMap<State, u64> = HashMap::new();
         let mut previous: HashMap<State, (State, PathArc)> = HashMap::new();
@@ -639,9 +648,9 @@ impl Engine {
             if distances.get(&state) != Some(&cost) {
                 continue;
             }
-            if state.stage == points.len() {
+            if state.stage == matches.len() {
                 ctx.phase("recover");
-                return self.recover(state, cost, &previous, &overlay, &matches, ctx);
+                return self.recover(state, cost, &previous, &overlay, matches, ctx);
             }
             ctx.diagnostics.settled_states += 1;
             let mut relax = |to: usize,
@@ -781,213 +790,20 @@ impl Engine {
             cursor = *parent;
         }
         traversals.reverse();
-        let mut geometry = vec![overlay.point(&self.graph, cursor.vertex)];
-        let mut snapped = vec![geometry[0]];
-        let mut legs = Vec::new();
-        let mut steps: Vec<Step> = Vec::new();
-        let mut total_distance = 0_u64;
-        let mut leg_distance = 0_u64;
-        let mut leg_time = 0_u64;
-        let mut leg_start = 0;
-        let mut prev_edge = None;
-        let mut roundabout_exit = 0;
-        let mut validated_previous: Option<Traversal> = None;
-        let mut validated_state = 0;
-        let mut recovered_cost = 0u64;
-        // Coincident waypoints consumed at the source produce explicit zero legs.
-        for _ in 1..cursor.stage {
-            legs.push(Leg {
-                distance_m: 0.,
-                duration_s: 0.,
-                geometry_start: 0,
-                geometry_end: 0,
-            });
-            snapped.push(geometry[0]);
-        }
-        for (arc, before, after) in traversals {
-            ctx.tick()?;
-            let e = &self.graph.edges[arc.edge];
-            if arc.end > arc.start {
-                let continuation =
-                    validated_previous.is_some_and(|p| p.edge == arc.edge && p.end == arc.start);
-                if let Some(previous) = validated_previous {
-                    if !continuation
-                        && (previous.end != 1.
-                            || arc.start != 0.
-                            || self.graph.edges[previous.edge].to != e.from)
-                    {
-                        return Err(Error::InvalidDataset);
-                    }
-                }
-                if !continuation {
-                    validated_state = self
-                        .restrictions
-                        .step(validated_state, arc.edge)
-                        .ok_or(Error::InvalidDataset)?;
-                    ctx.diagnostics.validated_route_edges += 1;
-                }
-                validated_previous = Some(arc);
-            }
-            let d = scaled(e.distance_mm, arc.end - arc.start)?;
-            let t = scaled(e.duration_ms, arc.end - arc.start)?;
-            recovered_cost = recovered_cost.checked_add(t).ok_or(Error::CostOverflow)?;
-            total_distance = total_distance.checked_add(d).ok_or(Error::CostOverflow)?;
-            leg_distance = leg_distance.checked_add(d).ok_or(Error::CostOverflow)?;
-            leg_time = leg_time.checked_add(t).ok_or(Error::CostOverflow)?;
-            let a = geometry.len() - 1;
-            let end = interpolate(self.graph.nodes[e.from], self.graph.nodes[e.to], arc.end);
-            geometry.push(end);
-            let b = geometry.len() - 1;
-            // Account for the outgoing-edge inspections performed by guidance.
-            for _ in &self.outgoing[e.from] {
-                ctx.tick()?;
-            }
-            let maneuver = if let Some(prev) = prev_edge {
-                self.maneuver(prev, arc.edge, &mut roundabout_exit)
-            } else {
-                "depart".into()
-            };
-            if let Some(last) = steps
-                .last_mut()
-                .filter(|last| maneuver == "straight" && last.name == e.name && !e.roundabout)
-            {
-                last.distance_m += d as f64 / 1000.;
-                last.duration_s += t as f64 / 1000.;
-                last.geometry_end = b;
-            } else {
-                steps.push(Step {
-                    exit: if maneuver == "roundabout_exit" {
-                        Some(roundabout_exit.max(1))
-                    } else {
-                        None
-                    },
-                    maneuver,
-                    name: e.name.clone(),
-                    distance_m: d as f64 / 1000.,
-                    duration_s: t as f64 / 1000.,
-                    geometry_start: a,
-                    geometry_end: b,
-                });
-            }
-            prev_edge = Some(arc.edge);
-            for stage in before..after {
-                legs.push(Leg {
-                    distance_m: leg_distance as f64 / 1000.,
-                    duration_s: leg_time as f64 / 1000.,
-                    geometry_start: leg_start,
-                    geometry_end: b,
-                });
-                snapped.push(end);
-                leg_start = b;
-                leg_distance = 0;
-                leg_time = 0;
-                let _ = stage;
-            }
-        }
-        let last = geometry.len() - 1;
-        if steps.is_empty() {
-            steps.push(Step {
-                maneuver: "depart".into(),
-                name: String::new(),
-                distance_m: 0.,
-                duration_s: 0.,
-                geometry_start: 0,
-                geometry_end: 0,
-                exit: None,
-            });
-        }
-        steps.push(Step {
-            maneuver: "arrive".into(),
-            name: String::new(),
-            distance_m: 0.,
-            duration_s: 0.,
-            geometry_start: last,
-            geometry_end: last,
-            exit: None,
-        });
-        if legs.len() != matches.len() - 1 || recovered_cost != cost {
-            return Err(Error::InvalidDataset);
-        }
-        Ok(RouteResult {
-            dataset_id: self.manifest.dataset_id.clone(),
-            profile: self.manifest.profile.clone(),
-            format: self.manifest.format,
-            distance_m: total_distance as f64 / 1000.,
-            duration_s: cost as f64 / 1000.,
-            geometry,
-            legs,
-            steps,
-            snapped,
-        })
-    }
-    fn maneuver(&self, prev: usize, next: usize, exit: &mut usize) -> String {
-        let a = &self.graph.edges[prev];
-        let b = &self.graph.edges[next];
-        if prev == next {
-            return if a.roundabout {
-                "roundabout_continue"
-            } else {
-                "straight"
-            }
-            .into();
-        }
-        if !a.roundabout && b.roundabout {
-            *exit = 0;
-            return "roundabout_enter".into();
-        }
-        if a.roundabout {
-            let has_exit = self.outgoing[a.to]
-                .iter()
-                .any(|&id| !self.graph.edges[id].roundabout && self.graph.edges[id].to != a.from);
-            if has_exit {
-                *exit += 1;
-            }
-            if !b.roundabout {
-                return "roundabout_exit".into();
-            }
-            return "roundabout_continue".into();
-        }
-        if a.to == b.to && a.from == b.from {
-            return "straight".into();
-        }
-        if a.from == b.to {
-            return "uturn".into();
-        }
-        if a.way == b.way
-            && self.outgoing[a.to]
-                .iter()
-                .filter(|&&id| self.graph.edges[id].to != a.from)
-                .count()
-                <= 1
-        {
-            return "straight".into();
-        }
-        if a.class.ends_with("_link") && !b.class.ends_with("_link") {
-            return "merge".into();
-        }
-        if !a.class.ends_with("_link") && b.class.ends_with("_link") {
-            return "exit".into();
-        }
-        let p = self.projected(self.graph.nodes[a.from]);
-        let q = self.projected(self.graph.nodes[a.to]);
-        let r = self.projected(self.graph.nodes[b.to]);
-        let incoming = (q[1] - p[1]).atan2(q[0] - p[0]);
-        let outgoing = (r[1] - q[1]).atan2(r[0] - q[0]);
-        let angle = (outgoing - incoming + std::f64::consts::PI)
-            .rem_euclid(2. * std::f64::consts::PI)
-            - std::f64::consts::PI;
-        if angle.abs() > 150_f64.to_radians() {
-            "uturn"
-        } else if angle > 30_f64.to_radians() {
-            "left"
-        } else if angle < -30_f64.to_radians() {
-            "right"
-        } else {
-            "straight"
-        }
-        .into()
+        recovery::recover_path(
+            self,
+            &self.restrictions,
+            cursor.vertex,
+            cursor.stage,
+            cost,
+            traversals,
+            matches.len(),
+            overlay,
+            ctx,
+        )
     }
 }
+
 fn scaled(value: u64, fraction: f64) -> Result<u64, Error> {
     // Preserve full-edge integer weights (including values above 2^53) so
     // customized metrics and the baseline search use exactly the same costs.
@@ -1055,8 +871,11 @@ struct Overlay {
 }
 impl Overlay {
     fn new(graph: &Graph, matches: &[Vec<Nearest>]) -> Self {
+        Self::with_base(graph.nodes.len(), matches)
+    }
+    fn with_base(base: usize, matches: &[Vec<Nearest>]) -> Self {
         let mut out = Self {
-            base: graph.nodes.len(),
+            base,
             splits: Vec::new(),
             by_edge: BTreeMap::new(),
             marks: BTreeMap::new(),
@@ -1095,6 +914,9 @@ impl Overlay {
         out
     }
     fn vertex(&self, _graph: &Graph, m: &Nearest) -> usize {
+        self.vertex_for(m)
+    }
+    fn vertex_for(&self, m: &Nearest) -> usize {
         if m.fraction <= 1e-10 {
             m.from
         } else if m.fraction >= 1. - 1e-10 {
@@ -1114,15 +936,6 @@ impl Overlay {
             stage += 1;
         }
         stage
-    }
-    fn point(&self, g: &Graph, vertex: usize) -> Point {
-        if vertex < self.base {
-            g.nodes[vertex]
-        } else {
-            let s = &self.splits[vertex - self.base];
-            let e = &g.edges[s.edge];
-            interpolate(g.nodes[e.from], g.nodes[e.to], s.fraction)
-        }
     }
     fn visit_incoming(
         &self,
