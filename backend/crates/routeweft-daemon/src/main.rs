@@ -1,13 +1,16 @@
 use routeweft_dataset::{GraphCapacity, Point};
 use routeweft_routing::acceleration::{self, CustomizationOptions};
-use routeweft_routing::{Engine, QueryDiagnostics, QueryOptions, RoutingAlgorithm, SearchBudget};
+use routeweft_routing::{
+    Engine, PagedEngine, PagedOptions, QueryDiagnostics, QueryOptions, RoutingAlgorithm,
+    SearchBudget,
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways|quarantine_ways] [--json]\nrouteweft audit-restrictions --input FILE.osm.pbf --output DIR [--max-memory-bytes N] [--json]\nrouteweft resource-plan --dataset DIR [--graph-capacity city|regional] [--max-plan-workspace-bytes N] [--json]\nrouteweft coverage --dataset DIR [--excluded-ways FILE.json] [load limits]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N] [--max-index-bytes N] [--resource-plan FILE]\nrouteweft sample-routes --dataset DIR [--count N] [--distance-bands-m 1000,10000|none] [--max-sample-workspace-bytes N]\nrouteweft serve --dataset DIR [query limits] (JSONL stdin/stdout, resident engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways|quarantine_ways (default quarantine_ways); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways/quarantine_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
+const HELP:&str="RouteWeft offline driving router\n\nrouteweft build --input FILE.osm.pbf --profile driving --output DIR [--format 1|2] [--builder memory|external]\nrouteweft preflight --input FILE.osm.pbf --profile driving [--invalid-restrictions reject|block_ways|quarantine_ways] [--json]\nrouteweft audit-restrictions --input FILE.osm.pbf --output DIR [--max-memory-bytes N] [--json]\nrouteweft resource-plan --dataset DIR [--graph-capacity city|regional] [--max-plan-workspace-bytes N] [--json]\nrouteweft coverage --dataset DIR [--excluded-ways FILE.json] [load limits]\nrouteweft version [--json]\nrouteweft inspect --dataset DIR [--mode full|metadata] [--json]\nrouteweft verify --dataset DIR [--json]\nrouteweft nearest --dataset DIR --coordinate 'lon,lat' [--radius-m 1000] [--json]\nrouteweft route --dataset DIR --coordinates 'lon,lat;lon,lat' [--radius-m 1000] [--json]\n\nrouteweft customize --dataset DIR [--graph-capacity regional] [--max-load-bytes N] [--max-index-bytes N] [--resource-plan FILE]\nrouteweft sample-routes --dataset DIR [--count N] [--distance-bands-m 1000,10000|none] [--max-sample-workspace-bytes N]\nrouteweft prepare-query --dataset DIR [load limits]\nrouteweft verify-query --dataset DIR [load limits]\nrouteweft serve --dataset DIR [--storage resident|paged] [--page-cache-bytes N] [--query-workspace-bytes N] [query limits] (JSONL stdin/stdout, persistent engine)\nQuery route: --algorithm auto|dijkstra (default auto)\nQuery limits: --max-work N --max-states N --max-queue N --timeout-ms N\nPreflight: --mode full|structure (default full)\nBuild/preflight: --invalid-restrictions reject|block_ways|quarantine_ways (default quarantine_ways); --invalid-maxspeed reject|use_default (default reject)\nAudit: --max-restriction-diagnostics N --max-restriction-audit-bytes N --max-blockways-attempts N (block_ways/quarantine_ways only)\nGraph capacity: --graph-capacity city|regional (default city); regional build requires external/v2; query --max-load-bytes N (estimated allocations, default 2 GiB)\nExternal builder: requires --format 2; --progress off|json (stderr JSONL); --scratch-dir DIR --max-scratch-bytes N --max-scratch-files N --build-timeout-ms N (cooperative phase checks)\nAll results and errors use JSON schema 1. Legacy positional routing is removed.";
 #[derive(Debug)]
 struct Failure {
     kind: String,
@@ -144,10 +147,21 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             | "customize"
             | "serve"
             | "sample-routes"
+            | "prepare-query"
+            | "verify-query"
     ) {
         return Err(bad("unknown command"));
     }
     let allowed: &[&str] = match command.as_str() {
+        "prepare-query" | "verify-query" => &[
+            "--dataset",
+            "--graph-capacity",
+            "--max-load-bytes",
+            "--page-cache-bytes",
+            "--query-workspace-bytes",
+            "--max-plan-workspace-bytes",
+            "--query-index-sha256",
+        ],
         "sample-routes" => &[
             "--dataset",
             "--graph-capacity",
@@ -198,6 +212,10 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         "version" => &[],
         "inspect" => &["--dataset", "--mode", "--graph-capacity"],
         "resource-plan" => &[
+            "--storage",
+            "--page-cache-bytes",
+            "--query-workspace-bytes",
+            "--query-index-sha256",
             "--dataset",
             "--graph-capacity",
             "--max-load-bytes",
@@ -233,6 +251,11 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--max-plan-workspace-bytes",
         ],
         "serve" => &[
+            "--max-plan-workspace-bytes",
+            "--storage",
+            "--page-cache-bytes",
+            "--query-workspace-bytes",
+            "--query-index-sha256",
             "--dataset",
             "--graph-capacity",
             "--max-load-bytes",
@@ -243,6 +266,11 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--timeout-ms",
         ],
         "route" => &[
+            "--max-plan-workspace-bytes",
+            "--storage",
+            "--page-cache-bytes",
+            "--query-workspace-bytes",
+            "--query-index-sha256",
             "--algorithm",
             "--dataset",
             "--coordinates",
@@ -255,6 +283,11 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "--timeout-ms",
         ],
         "nearest" => &[
+            "--max-plan-workspace-bytes",
+            "--storage",
+            "--page-cache-bytes",
+            "--query-workspace-bytes",
+            "--query-index-sha256",
             "--dataset",
             "--coordinate",
             "--graph-capacity",
@@ -312,6 +345,8 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "customize",
             "serve",
             "sample-routes",
+            "prepare-query",
+            "verify-query",
             "version",
         ];
         let resource_capability = json!({"schema":2,"estimator_version":routeweft_routing::resources::ESTIMATOR_VERSION,
@@ -332,7 +367,8 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
             "resident_jsonl":true,
             "route_sampling":sampling_capability,
             "v2_verify":"streaming", "runtime_memory_budget_kind":"estimated_allocations_not_rss",
-            "large_pbf_3gib":false, "dataset_access":"in_memory",
+            "large_pbf_3gib":false, "dataset_access":"resident_or_explicit_paged",
+            "paged_queries":{"version":2,"resource_plan_schema_version":1,"resource_plan_estimator_version":2,"index_format":"RWFTQI02","read_index_formats":["RWFTQI01","RWFTQI02"],"landmarks":4,"page_bytes":4096,"base_format":2,"prepare_command":"prepare-query","verify_command":"verify-query","cache":"bounded_bytes","algorithm":"compact_direct_astar_alt_or_dijkstra","mld":false,"fallback_to_resident":false},
             "preflight":"full_semantic_build", "preflight_cache":false,
             "preflight_modes":["full","structure"],
             "inspect_modes":["full","metadata"],
@@ -620,7 +656,64 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         );
     }
 
+    let number = |key: &str, default: u64| -> Result<u64, Failure> {
+        flags
+            .get(key)
+            .map(|v| v.parse().map_err(|_| bad(format!("invalid {key}"))))
+            .unwrap_or(Ok(default))
+    };
     let dataset = Path::new(required("--dataset")?);
+    let storage = flags.get("--storage").copied().unwrap_or("resident");
+    if !matches!(storage, "resident" | "paged") {
+        return Err(bad("storage must be resident or paged"));
+    }
+    let paged_options = PagedOptions {
+        cache_bytes: number("--page-cache-bytes", 16 * 1024 * 1024)?,
+        query_workspace_bytes: number("--query-workspace-bytes", 256 * 1024 * 1024)?,
+        planning_workspace_bytes: number("--max-plan-workspace-bytes", 64 * 1024 * 1024)?,
+    };
+    if command == "prepare-query" {
+        let build: Value = serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/build-identity.json"
+        )))
+        .expect("build identity");
+        let metadata = routeweft_dataset::paged::prepare_query_index(dataset, load_limits, build)
+            .map_err(data_error)?;
+        let digest =
+            routeweft_dataset::hash_file(&dataset.join(routeweft_dataset::paged::INDEX_FILE))
+                .map_err(data_error)?;
+        return Ok(
+            json!({"schema":1,"status":"ok","query_index":metadata,"query_index_sha256":digest}),
+        );
+    }
+    if command == "verify-query" || (command == "resource-plan" && storage == "paged") {
+        let mut limits = load_limits;
+        if command == "resource-plan" {
+            limits.max_resident_bytes = u64::MAX;
+        }
+        let engine = PagedEngine::open(dataset, limits, graph_capacity, paged_options)
+            .map_err(query_error)?;
+        if flags
+            .get("--query-index-sha256")
+            .is_some_and(|v| *v != engine.query_index_sha256())
+        {
+            return Err(bad("query index digest mismatch"));
+        }
+        let verification = if command == "verify-query" {
+            Some(
+                engine
+                    .verify_indexes(paged_options.planning_workspace_bytes)
+                    .map_err(query_error)?,
+            )
+        } else {
+            None
+        };
+        return Ok(
+            json!({"schema":1,"status":"ok","resource_plan":engine.resource_plan(),"query_index_sha256":engine.query_index_sha256(),"verification":verification}),
+        );
+    }
+
     if command == "resource-plan" {
         let workspace = flags
             .get("--max-plan-workspace-bytes")
@@ -665,12 +758,6 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
         };
         return Ok(json!({"schema":1,"status":"ok","verified":true,"manifest":m}));
     }
-    let number = |key: &str, default: u64| -> Result<u64, Failure> {
-        flags
-            .get(key)
-            .map(|v| v.parse().map_err(|_| bad(format!("invalid {key}"))))
-            .unwrap_or(Ok(default))
-    };
     if command == "customize" {
         let metadata =
             routeweft_dataset::inspect_manifest(dataset, load_limits).map_err(data_error)?;
@@ -752,9 +839,27 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
     }
     let load = Instant::now();
     let metadata = routeweft_dataset::inspect_manifest(dataset, load_limits).map_err(data_error)?;
-    routeweft_dataset::check_resident_budget(&metadata, load_limits, true).map_err(data_error)?;
-    let engine =
-        Engine::open_with_capacity(dataset, load_limits, graph_capacity).map_err(query_error)?;
+    if storage == "resident" {
+        routeweft_dataset::check_resident_budget(&metadata, load_limits, true)
+            .map_err(data_error)?;
+    }
+    let engine = if storage == "paged" {
+        ServiceEngine::Paged(Box::new(
+            PagedEngine::open(dataset, load_limits, graph_capacity, paged_options)
+                .map_err(query_error)?,
+        ))
+    } else {
+        ServiceEngine::Resident(Box::new(
+            Engine::open_with_capacity(dataset, load_limits, graph_capacity)
+                .map_err(query_error)?,
+        ))
+    };
+    if flags
+        .get("--query-index-sha256")
+        .is_some_and(|v| engine.query_index_sha256() != Some(*v))
+    {
+        return Err(bad("query index digest mismatch"));
+    }
     let load_ms = load.elapsed().as_secs_f64() * 1000.;
     if command == "sample-routes" {
         let size = |key, default| {
@@ -894,7 +999,7 @@ fn execute(args: Vec<String>) -> Result<Value, Failure> {
 /// One immutable engine per process. Requests are serial and bounded; callers can
 /// use a process pool instead of spawning a process (and reloading) per request.
 fn serve(
-    engine: &Engine,
+    engine: &ServiceEngine,
     load_ms: f64,
     defaults: SearchBudget<'_>,
     timeout_ms: u64,
@@ -904,7 +1009,7 @@ fn serve(
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut output = std::io::stdout().lock();
-    writeln!(output, "{}", json!({"schema":1,"status":"ready","dataset_id":engine.manifest().dataset_id,
+    writeln!(output, "{}", json!({"schema":1,"status":"ready","pid":std::process::id(),"storage":engine.storage(),"query_index_sha256":engine.query_index_sha256(),"page_stats":engine.page_stats(),"dataset_id":engine.manifest().dataset_id,
         "load_ms":load_ms,"load_diagnostics":engine.load_diagnostics(),"acceleration":engine.acceleration_info(),
         "acceleration_sha256":engine.acceleration_sha256(),"graph_sha256":engine.manifest().graph_sha256,
         "profile":engine.manifest().profile,"effective_query_limits":{"max_work":defaults.max_work,
@@ -1026,6 +1131,7 @@ fn serve(
         })()
         .unwrap_or_else(failure_json);
         response["id"] = id;
+        response["page_stats"] = json!(engine.page_stats());
         writeln!(output, "{response}").map_err(|_| query_error(routeweft_routing::Error::Io))?;
         output
             .flush()
@@ -1085,6 +1191,101 @@ fn main() -> ExitCode {
             let code = e.code;
             println!("{}", failure_json(e));
             ExitCode::from(code)
+        }
+    }
+}
+
+/// Explicit backend selection: a missing paged artifact never opens the resident graph.
+enum ServiceEngine {
+    Resident(Box<Engine>),
+    Paged(Box<PagedEngine>),
+}
+impl ServiceEngine {
+    fn storage(&self) -> &'static str {
+        match self {
+            Self::Resident(_) => "resident",
+            Self::Paged(_) => "paged",
+        }
+    }
+    fn manifest(&self) -> &routeweft_dataset::Manifest {
+        match self {
+            Self::Resident(e) => e.manifest(),
+            Self::Paged(e) => e.manifest(),
+        }
+    }
+    fn query_index_sha256(&self) -> Option<&str> {
+        match self {
+            Self::Resident(_) => None,
+            Self::Paged(e) => Some(e.query_index_sha256()),
+        }
+    }
+    fn page_stats(&self) -> Option<routeweft_dataset::paged::PageStats> {
+        match self {
+            Self::Resident(_) => None,
+            Self::Paged(e) => Some(e.page_stats()),
+        }
+    }
+    fn load_diagnostics(&self) -> routeweft_routing::LoadDiagnostics {
+        match self {
+            Self::Resident(e) => e.load_diagnostics(),
+            Self::Paged(e) => e.load_diagnostics(),
+        }
+    }
+    fn acceleration_info(&self) -> Option<acceleration::AccelerationInfo> {
+        match self {
+            Self::Resident(e) => e.acceleration_info(),
+            Self::Paged(e) => e.acceleration_info(),
+        }
+    }
+    fn acceleration_sha256(&self) -> Option<&str> {
+        match self {
+            Self::Resident(e) => e.acceleration_sha256(),
+            Self::Paged(e) => e.acceleration_sha256(),
+        }
+    }
+    fn route_detailed(
+        &self,
+        points: &[Point],
+        options: QueryOptions,
+        budget: &SearchBudget<'_>,
+        algorithm: RoutingAlgorithm,
+    ) -> routeweft_routing::QueryOutcome {
+        match self {
+            Self::Resident(e) => e.route_detailed(points, options, budget, algorithm),
+            Self::Paged(e) => e.route_detailed(points, options, budget, algorithm),
+        }
+    }
+    fn nearest_detailed(
+        &self,
+        point: Point,
+        options: QueryOptions,
+        budget: &SearchBudget<'_>,
+    ) -> (
+        Result<Vec<routeweft_routing::Nearest>, routeweft_routing::Error>,
+        QueryDiagnostics,
+    ) {
+        match self {
+            Self::Resident(e) => e.nearest_detailed(point, options, budget),
+            Self::Paged(e) => e.nearest_detailed(point, options, budget),
+        }
+    }
+    fn sample_routes(
+        &self,
+        options: routeweft_routing::SamplingOptions,
+        budget: &SearchBudget<'_>,
+    ) -> Result<routeweft_routing::RouteSamples, routeweft_routing::Error> {
+        match self {
+            Self::Resident(e) => e.sample_routes(options, budget),
+            Self::Paged(_) => Err(routeweft_routing::Error::IncompatibleFormat),
+        }
+    }
+    fn coverage(
+        &self,
+        excluded: &[i64],
+    ) -> Result<routeweft_routing::CoverageInfo, routeweft_routing::Error> {
+        match self {
+            Self::Resident(e) => e.coverage(excluded),
+            Self::Paged(_) => Err(routeweft_routing::Error::IncompatibleFormat),
         }
     }
 }
