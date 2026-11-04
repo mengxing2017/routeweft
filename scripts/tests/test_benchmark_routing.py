@@ -11,7 +11,7 @@ benchmark = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(benchmark)
 
 FAKE = '''#!/usr/bin/env python3
-import hashlib, json, pathlib, sys, time
+import hashlib, json, pathlib, sys, time, os
 config = json.loads(pathlib.Path(__file__).with_suffix('.json').read_text())
 if sys.argv[1] == 'version':
     print(json.dumps({'schema': 1, 'version': 'protocol-test-double'})); sys.exit()
@@ -22,7 +22,7 @@ actual = 'mld' if config.get('mld') and algorithm == 'auto' else 'dijkstra'
 if config.get('hang_ready'):
     time.sleep(10)
 artifact = dataset / 'routing.mld'
-print(json.dumps({'schema': 1, 'status': 'ready', 'dataset_id': manifest['dataset_id'],
+print(json.dumps({'schema': 1, 'status': 'ready', 'pid': config.get('ready_pid', os.getpid()), 'dataset_id': manifest['dataset_id'],
     'graph_sha256': manifest['graph_sha256'], 'profile': config.get('ready_profile', 'driving-v1'),
     'acceleration': {'algorithm': 'mld'} if config.get('mld') else None,
     'acceleration_sha256': hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.exists() else None,
@@ -37,6 +37,8 @@ for line in sys.stdin:
     record = {'schema': 1, 'id': request['id'], 'status': 'ok',
         'route': {'duration_s': config.get('actual_cost', 1) if algorithm == 'auto' else 1, 'legs': [{}]},
         'diagnostics': {'algorithm': actual, 'elapsed_ms': elapsed, 'states': 10, 'work': 20}}
+    if 'phase_reads' in config:
+        record['diagnostics']['phases'] = [{'phase': 'search', 'cache_bytes_read': config['phase_reads']}]
     if config.get('fallback_query') and algorithm == 'auto':
         record['diagnostics']['algorithm'] = 'dijkstra'
     if config.get('baseline_failure') and algorithm == 'dijkstra':
@@ -143,6 +145,42 @@ class BenchmarkTests(unittest.TestCase):
             ['--mode', 'acceptance', '--require-mld'])
         self.assertEqual(code, 1)
         self.assertIn('resident_resource_identity_mismatch', [f['reason'] for f in summary['failures']])
+
+    def test_per_query_reads_gate_requires_measurement_and_rejects_amplification(self):
+        flags = ['--mode', 'acceptance', '--max-query-read-mib', '1', '--warmup', '1']
+        code, summary, _ = self.run_case({}, flags)
+        self.assertEqual(code, 1)
+        self.assertIn('query_read_measurement_unavailable', [f['reason'] for f in summary['failures']])
+        code, summary, _ = self.run_case({'phase_reads': 2 * 1024**2}, flags)
+        self.assertEqual(code, 1)
+        self.assertTrue(any(f.get('metric') == 'query_read_bytes' and f['id'].startswith('warmup') for f in summary['failures']))
+        code, summary, _ = self.run_case({'phase_reads': 1024}, flags)
+        self.assertEqual(code, 0, summary)
+
+    @unittest.skipUnless(__import__('sys').platform == 'linux', 'Linux process memory accounting')
+    def test_memory_receipts_measure_engine_pid_and_memory_gates_reject(self):
+        import os
+        code, summary, receipts = self.run_case({'mld': True},
+            ['--mode', 'acceptance', '--max-peak-rss-mib', '.001'])
+        self.assertEqual(code, 1)
+        memory = receipts['auto']['memory']
+        self.assertNotEqual(memory['pid'], os.getpid())
+        self.assertEqual(memory['pid'], receipts['auto']['ready']['pid'])
+        self.assertEqual(memory['unit'], 'KiB')
+        self.assertGreater(memory['peak_rss_kib'], 0)
+        self.assertIsNotNone(memory['after_measurement_rss_kib'])
+        self.assertTrue(memory['timeline'])
+        self.assertTrue(any(f.get('metric') == 'peak_rss_kib' for f in summary['failures']))
+
+    def test_unknown_memory_and_wrong_pid_cannot_pass_memory_acceptance(self):
+        from unittest.mock import patch
+        with patch.object(benchmark.MemoryMonitor, 'snapshot'):
+            code, summary, _ = self.run_case({}, ['--mode', 'acceptance', '--max-steady-rss-mib', '100'])
+        self.assertEqual(code, 1)
+        self.assertIn('memory_measurement_unavailable', [f['reason'] for f in summary['failures']])
+        code, summary, _ = self.run_case({'ready_pid': -1})
+        self.assertEqual(code, 1)
+        self.assertIn('execution_or_protocol_failure', [f['reason'] for f in summary['failures']])
 
 
 if __name__ == '__main__':
