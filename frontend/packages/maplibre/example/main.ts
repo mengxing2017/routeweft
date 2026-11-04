@@ -17,7 +17,7 @@ const layer = createRouteLayer(map);
 const unsubscribe = planner.subscribe(() => {
   const state = planner.getSnapshot();
   layer.setRoute(undefined); layer.setWaypoints(state.points); layer.setRoute(state.route);
-  document.querySelector('#status')!.textContent = state.busy ? 'Calculating…' : state.error ? String(state.error) : state.route ? 'Fixture route displayed' : '';
+  document.querySelector('#status')!.textContent = state.busy ? 'Calculating…' : state.error ? String(state.error) : state.route ? layer.getAccessNotice() || 'Fixture route displayed' : '';
 });
 const calculate = () => { planner.setPoints(points); void planner.calculate(); };
 document.querySelector('#calculate')!.addEventListener('click', calculate);

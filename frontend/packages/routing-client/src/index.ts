@@ -8,10 +8,20 @@ export interface Leg {
   distance_m: number; duration_s: number; geometry_start: number; geometry_end: number;
 }
 export interface Step extends Leg { maneuver: string; name: string; exit: number | null }
+export interface RouteAccess {
+  requested_coordinate: Point; snapped_coordinate: Point; snap_distance_m: number;
+  access_status: 'on_network' | 'unknown';
+}
+export interface SnapDetail extends RouteAccess {
+  search_radius_m: number; snap_method: 'road_projection' | 'reachable_alternative';
+  fallback_used: boolean; arrival_status: 'on_network' | 'nearby';
+}
 export interface RouteResult {
   dataset_id: string; profile: string; format: number;
   distance_m: number; duration_s: number; geometry: Point[];
   legs: Leg[]; steps: Step[]; snapped: Point[];
+  /** Optional for compatibility with older host transports. New engines always return these. */
+  distance_scope?: 'road_only'; snap_details?: SnapDetail[];
 }
 export interface Nearest {
   edge: number; point: Point; fraction: number; distance_m: number; from: number; to: number;
@@ -76,7 +86,36 @@ export function projectRouteToWorld(route: RouteResult, original: readonly Point
   const offsets = original.map(p => p.lon - normalizePoint(p).lon);
   const offset = offsets.find(value => value !== 0) ?? 0;
   return { ...route, geometry: route.geometry.map(p => ({ ...p, lon: p.lon + offset })),
-    snapped: route.snapped.map((p, i) => ({ ...p, lon: p.lon + offsets[i] })) };
+    snapped: route.snapped.map((p, i) => ({ ...p, lon: p.lon + offsets[i] })),
+    snap_details: route.snap_details?.map((detail, i) => ({ ...detail,
+      requested_coordinate: { ...detail.requested_coordinate, lon: detail.requested_coordinate.lon + offsets[i] },
+      snapped_coordinate: { ...detail.snapped_coordinate, lon: detail.snapped_coordinate.lon + offsets[i] } })) };
+}
+/** Access gaps are spatial offsets, never verified walking/driving connections. */
+export function getRouteAccess(route: RouteResult, original?: readonly Point[]): RouteAccess[] {
+  const requested = original ?? route.snap_details?.map(d => d.requested_coordinate) ?? route.snapped;
+  if (requested.length !== route.snapped.length)
+    throw new RoutingError('InvalidInput', 'Waypoint count differs from snapped result');
+  return route.snapped.map((snapped, i) => {
+    const a = requested[i];
+    const rad = Math.PI / 180;
+    const h = Math.sin((snapped.lat - a.lat) * rad / 2) ** 2 +
+      Math.cos(a.lat * rad) * Math.cos(snapped.lat * rad) * Math.sin((snapped.lon - a.lon) * rad / 2) ** 2;
+    const distance = 6371008.8 * 2 * Math.asin(Math.sqrt(Math.max(0, Math.min(1, h))));
+    return { requested_coordinate: { ...a }, snapped_coordinate: { ...snapped }, snap_distance_m: distance,
+      access_status: distance <= 0.01 ? 'on_network' : 'unknown' };
+  });
+}
+export function getRouteAccessNotice(route: RouteResult, original?: readonly Point[]): string {
+  const access = getRouteAccess(route, original);
+  const messages: string[] = [];
+  if (access[0]?.access_status === 'unknown')
+    messages.push(`道路导航从距起点约 ${Math.ceil(access[0].snap_distance_m)} 米处开始`);
+  const end = access.at(-1);
+  if (end?.access_status === 'unknown')
+    messages.push(`导航至目的地附近，道路终点距标记约 ${Math.ceil(end.snap_distance_m)} 米`);
+  if (access.slice(1, -1).some(d => d.access_status === 'unknown')) messages.push('途经点与道路之间存在偏移');
+  return messages.length ? `${messages.join('；')}。连接通行未验证，道路里程和耗时不含连接段。` : '';
 }
 export type RouteOutcome = { status: 'ok'; route: RouteResult } | { status: 'skipped' | 'superseded' };
 /** One instance per interactive routing control. Direct client calls remain independent. */
