@@ -58,3 +58,5 @@ MLD 检查覆盖格式、类型、图绑定、数组计数、offset 单调性、
 原 `routeweft_dataset::resource_plan` / `resource_plan_from_manifest` 和 build 内嵌结果继续提供 **schema 1、estimator 1 的基础图计划**。能力声明明确给出 build_output_schema=1、build_output_scope=base_graph_only；基础计划保留 optional_routing_mld 未知项。完整命令和库调用方应改用 `routeweft_routing::resources::resource_plan`，不能把 build 基础计划当作 MLD 准入回执。基础预算错误的 estimator_version 仍为 1；MLD 预算不足返回 BudgetExceeded。
 
 计费共享于实际拓扑构造、定制、MLD 解码和反向 CSR 构建。计费使用 checked arithmetic，溢出拒绝。未知项仍包括在线查询/coverage 工作区、审计和输出缓冲、进程与 OS 开销，以及 PBF 构建和 scratch 峰值；它们不是零。宿主负责物理内存预留、并发准入和容器上限，并分别记录逻辑估算与实际 RSS。
+
+按需存储、runtime 字节准入与实际引擎 PID 内存验收参见[按需查询与内存所有权](paged-routing.md)。
