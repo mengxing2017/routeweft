@@ -1,12 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Map } from 'maplibre-gl';
 import type { RouteResult } from '@routeweft/routing-client';
-const markers = vi.hoisted(() => [] as { removed: boolean }[]);
+const markers = vi.hoisted(() => [] as { removed: boolean; point?: number[]; popup?: { text: string } }[]);
 vi.mock('maplibre-gl', () => ({ default: { Marker: class {
   removed = false;
+  point?: number[]; popup?: { text: string };
   constructor() { markers.push(this); }
-  setLngLat() { return this; } addTo() { return this; } remove() { this.removed = true; }
-} } }));
+  setLngLat(point: number[]) { this.point = point; return this; }
+  setPopup(popup: { text: string }) { this.popup = popup; return this; }
+  togglePopup() { return this; }
+  addTo() { return this; } remove() { this.removed = true; }
+}, Popup: class { text = ''; setText(text: string) { this.text = text; return this; } } } }));
 import { createRouteLayer } from '../src/index';
 class FakeMap {
   sources = new Map<string, { data: unknown; setData(data: unknown): void }>();
@@ -69,5 +73,48 @@ describe('route layer lifecycle', () => {
     layer.setRoute(route);const other=createRouteLayer(map.map(),{id:'shared'});
     expect(()=>other.setRoute(route)).toThrow('already exists');other.dispose();expect(map.layers.size).toBe(1);
     layer.setRoute(undefined);map.reload();expect(map.layers.size).toBe(0);layer.dispose();
+  });
+  it('separates unverified access gaps, keeps world copies and fits the original destination', () => {
+    const map = new FakeMap();
+    const layer = createRouteLayer(map.map(), { id: 'nearby' });
+    const requested = [{ lon: 361, lat: 0 }, { lon: 362, lat: 1.001 }];
+    layer.setWaypoints(requested); layer.setRoute(route);
+    expect(map.layers.size).toBe(2);
+    const gap = map.sources.get('nearby-access')!.data as any;
+    expect(gap.features[0].geometry.coordinates).toEqual([[362, 1.001], [362, 1]]);
+    expect(gap.features[0].properties.access_status).toBe('unknown');
+    expect(map.layers.get('nearby-access')).toMatchObject({ paint: { 'line-dasharray': [2, 2] } });
+    expect(layer.getAccessNotice()).toContain('导航至目的地附近');
+    expect(layer.getAccessNotice()).toContain('不含连接段');
+    expect(map.fitBounds).toHaveBeenLastCalledWith([[361, 0], [362, 1.001]], { padding: 60, maxZoom: 16 });
+    expect(markers.filter(m => !m.removed).at(-1)?.popup?.text).toContain('通行未验证');
+    map.reload(); expect(map.layers.size).toBe(2);
+    expect(markers.filter(m => !m.removed)).toHaveLength(3);
+    layer.clear(); expect(map.sources.size).toBe(0); expect(layer.getAccessNotice()).toBe('');
+    expect(markers.every(m => m.removed)).toBe(true); layer.dispose();
+  });
+  it('uses backend requested coordinates without separate waypoint calls and cleans up after map removal', () => {
+    const map = new FakeMap(); const layer = createRouteLayer(map.map(), { id: 'details' });
+    const nearby: RouteResult = { ...route, snap_details: route.snapped.map((p, i) => ({
+      requested_coordinate: { ...p, lat: p.lat + (i ? 0.001 : 0) }, snapped_coordinate: p,
+      snap_distance_m: i ? 111.195 : 0, search_radius_m: 1000, snap_method: 'road_projection',
+      fallback_used: false, access_status: i ? 'unknown' : 'on_network', arrival_status: i ? 'nearby' : 'on_network'
+    })) };
+    layer.setRoute(nearby);
+    expect(map.sources.has('details-access')).toBe(true);
+    expect(layer.getAccessNotice()).toContain('附近');
+    expect(markers.filter(m => !m.removed).some(m => m.point?.[1] === 1.001)).toBe(true);
+    map.remove(); expect(markers.every(m => m.removed)).toBe(true);
+    expect(() => layer.dispose()).not.toThrow();
+  });
+  it('shows access gaps for a zero-length road route without inventing a road line', () => {
+    const map = new FakeMap(); const layer = createRouteLayer(map.map(), { id: 'zero' });
+    layer.setWaypoints([{ lon: 1, lat: -0.001 }, { lon: 1, lat: 0.001 }]);
+    layer.setRoute({ ...route, geometry: [route.geometry[0]], snapped: [route.snapped[0], route.snapped[0]],
+      distance_m: 0, duration_s: 0, steps: [] });
+    expect(map.sources.has('zero')).toBe(false);
+    expect((map.sources.get('zero-access')!.data as any).features).toHaveLength(2);
+    expect(layer.getAccessNotice()).toContain('不含连接段');
+    layer.dispose(); expect(map.sources.size).toBe(0);
   });
 });
