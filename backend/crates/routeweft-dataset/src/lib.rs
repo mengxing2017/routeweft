@@ -1,4 +1,5 @@
 //! Versioned, bounded, immutable routing dataset. No process-global resources.
+pub mod paged;
 mod resources;
 pub use resources::{
     estimate_resident, inspect_topology_bounds, resource_plan, resource_plan_from_manifest,
