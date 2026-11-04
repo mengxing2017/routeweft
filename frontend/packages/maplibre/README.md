@@ -29,8 +29,12 @@ const unsubscribe = planner.subscribe(() => {
 ```
 
 Default IDs isolate instances. Explicit IDs must be unique in the map style.
-Route state is restored after `style.load`; no straight-line fallback is drawn.
+Route state is restored after `style.load`; no route is invented when routing fails.
 World copies affect display only. Dispose before or after map removal.
+
+路外起终点会显示灰色虚线、道路吸附点及“连接示意，通行未验证”的提示；道路仍使用独立实线。原始点通过 `setWaypoints` 保留；只传新引擎的 `snap_details` 也可显示网外原始点。镜头同时覆盖原始点和道路位置，包括零道路长度的合法结果。虚线不是步行导航，不计入道路里程/耗时。
+
+宿主可在结果面板使用 `layer.getAccessNotice()` 显示“导航至目的地附近”等说明，清除路线后返回空串。示例页面已接入该提示。新引擎的附近候选与详细语义见后端 `docs/api.md`；本适配器也支持旧响应配合 `setWaypoints` 显示偏移。
 
 Run the local synthetic fixture with `pnpm --dir frontend install`, build routing-client, then `pnpm --dir frontend/packages/maplibre example`. The example uses a blank map and an explicitly supplied local fixture transport; it never contacts a routing service.
 

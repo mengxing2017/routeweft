@@ -57,6 +57,10 @@ export function createMapRouting(hostRouting: RoutingTransport) {
 
 `projectRouteToWorld` 按上游策略将几何移到第一个非零偏移的世界副本，吸附点使用各自偏移，不修改原始结果；它不是跨日期变更线几何切割算法。渲染后的坐标仅供显示。原始类型与接口不依赖任何地图组件。
 
+新引擎还返回 `distance_scope: 'road_only'` 和每点 `snap_details`，记录原始坐标、吸附坐标、实际偏移、搜索半径、是否采用可达备选及未知接驳/附近到达状态。类型中这两个字段可选以兼容旧 transport。默认 1,000 米内可尝试附近可达的起终点，途经点保持严格匹配；显式 `{radius_m:3000}` 可扩大搜索，不会无限扩大或绕过道路限制。
+
+`getRouteAccess(route, original?)` 返回每点网外偏移；没有新字段的旧响应可提供原始点来计算。`getRouteAccessNotice(route, original?)` 返回附近到达、道路起点偏移与道路 ETA 不含连接段的中文提示；没有偏移时返回空串。`projectRouteToWorld` 同时投影吸附描述，保留原始响应。未知连接仅为空间示意，不能当作已验证步行路线。
+
 抽取来源、修改说明和许可见 THIRD_PARTY_NOTICES.md 与 LICENSE.osrm-frontend。
 
 ## 远程发布与版本
