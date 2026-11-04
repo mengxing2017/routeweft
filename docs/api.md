@@ -24,6 +24,16 @@ Engine 持有不可变图、R-tree 和限制自动机，允许 Arc 共享并发�
 
 `QueryOptions` 指定 Driving、最大吸附半径和候选数；Cycling/Walking 返回 UnsupportedProfile。`SearchBudget` 指定 max_work、max_states、max_queue、max_geometry、可选 Instant deadline 以及可选 AtomicBool 取消标记。默认最大几何点数 100,000；取消标记由调用者管理，库不偷偷生成后台任务。预算耗尽与 NoRoute 分别返回，调用者负责排队及并发限制。
 
+### 路网外起终点与附近到达
+
+默认 `radius_m=1000` 米，显式范围 `(0,10000]`，不自动突破调用方半径。`nearest` 的 `candidates` 仍是有向边数量上限；`route` 则保留最多该数量的物理线段，并在总计 `2*candidates` 条有向候选内优先保留各方向及可容纳的平行边。几何最近候选可合法算路时，保持原路线；只有 `NoRoute` 才按起终点总偏移从小到大尝试附近候选。所有尝试共享工作、状态、队列、取消、截止时间与分页资源预算；不新增网外图边，不回退加载完整省图。候选数是有界搜索策略，不能保证发现半径内所有可能路线。
+
+途经点保留最近位置与连续限制历史，不做附近替代；小分量向主分量的既有兜底也仅适用于起终点。不同最近路网位置不能通过共同吸到远处一点而变成零长度成功路线；原本就投影到同一点的输入仍可返回合法零道路长度。
+
+`RouteResult` 保留既有 `snapped`，增加 `distance_scope="road_only"` 和与输入点一一对应的 `snap_details: Vec<SnapDetail>`。每项包含 `requested_coordinate`、`snapped_coordinate`、`snap_distance_m`、`search_radius_m`、`snap_method`（`road_projection` / `reachable_alternative`）、`fallback_used`、`access_status`（`on_network` / `unknown`）和 `arrival_status`（`on_network` / `nearby`）。偏移超过 0.01 米即标为未知接驳和附近位置；该数值仅为几何重合容差，不代表现实入口验证。`fallback_used` 表示最终偏移超过最近候选偏移 0.01 米。
+
+路线几何、里程、耗时、步骤均只覆盖道路。不得把原始点与吸附点间的直线当成可行驶/可步行路线，也不得把道路 ETA 当作含网外接驳的完整到达时间。起点在路外时，导航从道路吸附点开始；终点在路外时，应提示“导航至目的地附近”及偏移距离。当前不依赖 Walking、POI 入口或在线服务，宿主可先使用道路附近路线。
+
 错误枚举区分 InvalidInput、UnsupportedProfile、NoSegment、NoRoute、InvalidDataset、IncompatibleFormat、BudgetExceeded、Cancelled、CostOverflow 和 Io。查询 API 不 panic 终止宿主；资源申请仍受平台分配失败行为影响，应配合输入及部署限制。
 
 NodeEngine 保留节点级 P0 搜索，只有合成图用途，不提供持久格式或完整坐标语义。使用多个独立查询拼接不会继承转向历史；多途经点必须一次传给 Engine::route。
