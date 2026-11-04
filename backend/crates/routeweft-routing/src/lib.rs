@@ -235,6 +235,7 @@ impl NodeEngine {
 mod roads;
 mod topology;
 pub use roads::{
-    CoverageInfo, Engine, Leg, LoadDiagnostics, Nearest, QueryOptions, RouteResult, RouteSample,
-    RouteSamples, SamplingOptions, Step, SAMPLER_VERSION,
+    CoverageInfo, Engine, Leg, LoadDiagnostics, Nearest, PagedEngine, PagedOptions,
+    PagedResourcePlan, QueryOptions, RouteResult, RouteSample, RouteSamples, SamplingOptions, Step,
+    SAMPLER_VERSION,
 };

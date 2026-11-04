@@ -1,7 +1,9 @@
 mod components;
 mod compression;
+mod paged;
 mod recovery;
 mod sampling;
+pub use paged::{PagedEngine, PagedOptions, PagedResourcePlan};
 mod search;
 use crate::acceleration::{AccelerationInfo, CustomizationOptions, Index, Link};
 use crate::diagnostics::Context;
@@ -166,6 +168,7 @@ pub struct Engine {
 }
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct LoadDiagnostics {
+    pub paged: Option<routeweft_dataset::paged::PagedOpenDiagnostics>,
     pub dataset_ms: f64,
     pub acceleration_ms: f64,
     pub index_ms: f64,
