@@ -496,3 +496,53 @@ fn generated_cross_edge_samples_feed_real_resident_acceptance_and_report_shortfa
     assert_eq!(summary["auto"]["algorithms"], json!(["mld"]));
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn paged_cli_prepares_verifies_and_requires_explicit_compatible_index() {
+    let path = fixture();
+    let dir = path.to_str().unwrap();
+    assert_ne!(
+        run(&[
+            "nearest",
+            "--dataset",
+            dir,
+            "--storage",
+            "paged",
+            "--coordinate",
+            "0,0"
+        ])
+        .0,
+        0
+    );
+    assert_eq!(run(&["prepare-query", "--dataset", dir]).0, 0);
+    let (code, verified) = run(&["verify-query", "--dataset", dir]);
+    assert_eq!(code, 0, "{verified}");
+    let (code, plan) = run(&["resource-plan", "--dataset", dir, "--storage", "paged"]);
+    assert_eq!(code, 0, "{plan}");
+    assert_eq!(plan["resource_plan"]["schema"], 1);
+    let (code, result) = run(&[
+        "route",
+        "--dataset",
+        dir,
+        "--storage",
+        "paged",
+        "--coordinates",
+        "0,0;0.00799,0",
+        "--radius-m",
+        "1",
+    ]);
+    assert_eq!(code, 0, "{result}");
+    let (code, mismatch) = run(&[
+        "nearest",
+        "--dataset",
+        dir,
+        "--storage",
+        "paged",
+        "--query-index-sha256",
+        &"0".repeat(64),
+        "--coordinate",
+        "0,0",
+    ]);
+    assert_ne!(code, 0, "{mismatch}");
+    std::fs::remove_dir_all(path).unwrap();
+}
