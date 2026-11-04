@@ -49,3 +49,13 @@ v2 是存储编码，不代表按需图访问。默认构建使用内存，可�
 v2 的 verify 和完整 inspect 使用 64 MiB 工作预算流式校验，不创建查询索引。加载 Graph/Engine 前检查 `LoadOptions.max_resident_bytes`（CLI 查询参数 `--max-load-bytes`，默认 2 GiB）的分配估算，超限返回 estimated_resident_bytes；该估算包含图、字符串展开及索引，不是操作系统 RSS 限制。字典驻内存分配估算另限 256 MiB。大图可能需要显式提高加载预算，实际部署需测量 RSS。
 
 空间/邻接索引没有持久化，当前格式没有缓存恢复或来源认证机制。未来布局变化需新的格式版本或明确协商，当前读取器不会忽略保留标志。消费者使用前应检查 `version.dataset_formats`；只支持 v1 的旧工具应继续接收默认 v1 数据集。
+
+## 可选查询索引 RWFTQI02
+
+`prepare-query` 写入的 query.idx 独立于基础图 format 2，使用 RWFTQI02 / metadata schema 2。固定 4096 字节头中：8 字节 magic、4 字节 little-endian JSON 长度、UTF-8 metadata，其余填零；文件最后 32 字节为之前全部字节的 SHA-256。回执的 query_index_sha256 对包括尾部摘要的完整文件计算。
+
+metadata 给出各段绝对偏移。按顺序是字典位置（u64 offset + u32 length）、节点 CSR offsets（N+1 个 u64）、原始出边 ID（E 个 u64）、弱分量（每节点 root/size 两个 u32）、空间 BVH（64 字节记录）、空间边 ID（E 个 u64）、紧凑 CSR 出边（每条 u64 edge_id/to/duration_ms）和 landmark potential（每节点 4 个 u64）。所有整数小端，数组按物理节点 ID/CSR 顺序；不依赖 Rust 对象布局。
+
+landmark 在最大弱分量上从最小 root 开始，以到已选 landmarks 的最小无向距离最大的节点继续选择，相同距离取小节点 ID，共 4 次。不可达 potential 为 u64::MAX；极大距离饱和到 u64::MAX-1。验证器逐边校验紧凑成本/终点绑定和整数 potential 可行性，因此生成算法的变化不能绕过下界的语义验证。
+
+RWFTQI01 继续读取并使用直接 Dijkstra。RWFTQI02 的 reader 不会静默忽略格式/校验失败。新索引须在独立 staging 生成、verify-query 后冻结，不能原地修改已交付的不可变地图。完整操作与资源契约见 [按需查询](paged-routing.md)。
