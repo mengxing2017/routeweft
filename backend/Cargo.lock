@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "routeweft-daemon"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "routeweft-dataset",
  "routeweft-domain",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "routeweft-dataset"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "routeweft-domain",
  "serde",
@@ -203,11 +203,11 @@ dependencies = [
 
 [[package]]
 name = "routeweft-domain"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 
 [[package]]
 name = "routeweft-preprocess"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "flate2",
  "routeweft-dataset",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "routeweft-routing"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "routeweft-dataset",
  "routeweft-domain",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "routeweft-runtime"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "routeweft-dataset",
  "routeweft-routing",
