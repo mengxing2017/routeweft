@@ -22,6 +22,16 @@ impl FakeLoader {
 }
 impl Loader for FakeLoader {
     type Engine = DatasetIdentity;
+    fn memory_requirements(
+        &self,
+        _: &std::path::Path,
+        _: LoadConfig,
+    ) -> Result<crate::MemoryRequirements, RuntimeError> {
+        Ok(crate::MemoryRequirements {
+            load_peak_bytes: 80 * 1024 * 1024,
+            resident_bytes: 32 * 1024 * 1024,
+        })
+    }
     fn open(
         &self,
         _: &std::path::Path,
@@ -123,6 +133,9 @@ async fn resource_single_flight_keeps_inflight_revision_and_abandoned_lease() {
         .unwrap();
     assert!(Arc::ptr_eq(&loaded, &same.await.unwrap().unwrap()));
     assert!(!Arc::ptr_eq(&loaded, &upgraded.await.unwrap().unwrap()));
+    assert!(!dropped.load(Ordering::Relaxed));
+    runtime.evict(&loaded.dataset_id).await;
+    drop(loaded);
     assert!(dropped.load(Ordering::Relaxed));
     assert_eq!(loader.calls.load(Ordering::Relaxed), 2);
 }
@@ -207,6 +220,9 @@ async fn abandoned_waiter_keeps_load_quota_and_file_guard() {
         .await
         .unwrap();
     assert_eq!(**loaded, identity('a'));
+    assert!(!dropped.load(Ordering::Relaxed));
+    runtime.evict(&loaded.dataset_id).await;
+    drop(loaded);
     assert!(dropped.load(Ordering::Relaxed));
     assert_eq!(loader.calls.load(Ordering::Relaxed), 1);
 }
@@ -373,4 +389,131 @@ async fn bounded_queue_distinguishes_admission_queue_timeout_and_request_deadlin
     release.store(true, Ordering::Relaxed);
     active.await.unwrap().unwrap();
     queued.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn byte_quota_covers_abandoned_load_peak_active_handle_and_replacement() {
+    const MIB: u64 = 1024 * 1024;
+    let loader = FakeLoader::new(0);
+    let runtime = Runtime::new(
+        loader.clone(),
+        RuntimeConfig {
+            memory_budget_bytes: Some(100 * MIB),
+            resident_datasets: 3,
+            parallel_loads: 2,
+            ..Default::default()
+        },
+    );
+    let waiter = {
+        let r = runtime.clone();
+        tokio::spawn(async move { r.load("a".into(), identity('a'), deadline()).await })
+    };
+    loader.started.acquire().await.unwrap().forget();
+    assert_eq!(runtime.memory_usage().reserved_bytes, 80 * MIB);
+    waiter.abort();
+    let _ = waiter.await;
+    assert!(matches!(
+        runtime.load("b".into(), identity('b'), deadline()).await,
+        Err(RuntimeError::MemoryBudgetExceeded { .. })
+    ));
+    assert_eq!(loader.calls.load(Ordering::Relaxed), 1);
+    loader.release.add_permits(1);
+    let handle = runtime
+        .load("a".into(), identity('a'), deadline())
+        .await
+        .unwrap();
+    assert_eq!(runtime.memory_usage().reserved_bytes, 32 * MIB);
+    runtime.evict(&handle.dataset_id).await;
+    assert_eq!(runtime.memory_usage().reserved_bytes, 32 * MIB);
+    assert!(matches!(
+        runtime.load("b".into(), identity('b'), deadline()).await,
+        Err(RuntimeError::MemoryBudgetExceeded { .. })
+    ));
+    assert_eq!(runtime.memory_usage().reserved_bytes, 32 * MIB);
+    drop(handle);
+    assert_eq!(runtime.memory_usage().reserved_bytes, 0);
+    loader.release.add_permits(1);
+    let new = runtime
+        .load("b".into(), identity('b'), deadline())
+        .await
+        .unwrap();
+    assert_eq!(runtime.memory_usage().reserved_bytes, 32 * MIB);
+    drop(new);
+    runtime.evict(&identity('b').dataset_id).await;
+    assert_eq!(runtime.memory_usage().reserved_bytes, 0);
+    assert_eq!(runtime.memory_usage().peak_reserved_bytes, 96 * MIB);
+    assert!(runtime.memory_usage().rejections >= 2);
+}
+
+#[tokio::test]
+async fn query_bytes_remain_reserved_after_timeout_until_blocking_operation_exits() {
+    const MIB: u64 = 1024 * 1024;
+    let runtime = Runtime::new(
+        FakeLoader::new(1),
+        RuntimeConfig {
+            memory_budget_bytes: Some(128 * MIB),
+            query_workspace_bytes: 64 * MIB,
+            parallel_queries: 2,
+            ..Default::default()
+        },
+    );
+    let started = Arc::new(Semaphore::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let task = {
+        let r = runtime.clone();
+        let started = started.clone();
+        let release = release.clone();
+        tokio::spawn(async move {
+            r.execute(Instant::now() + Duration::from_millis(50), move |_| {
+                started.add_permits(1);
+                while !release.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(())
+            })
+            .await
+        })
+    };
+    started.acquire().await.unwrap().forget();
+    assert_eq!(task.await.unwrap(), Err(RuntimeError::DeadlineExceeded));
+    assert_eq!(runtime.memory_usage().reserved_bytes, 64 * MIB);
+    release.store(true, Ordering::Relaxed);
+    for _ in 0..100 {
+        if runtime.memory_usage().reserved_bytes == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("query reservation was not released");
+}
+
+#[tokio::test]
+async fn distinct_runtimes_share_host_process_byte_admission() {
+    const MIB: u64 = 1024 * 1024;
+    let pool = crate::MemoryBudget::new(Some(100 * MIB));
+    let first =
+        Runtime::with_memory_budget(FakeLoader::new(1), RuntimeConfig::default(), pool.clone());
+    let second =
+        Runtime::with_memory_budget(FakeLoader::new(1), RuntimeConfig::default(), pool.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let engine = first
+        .load("a".into(), identity('a'), deadline)
+        .await
+        .unwrap();
+    assert_eq!(pool.usage().reserved_bytes, 32 * MIB);
+    assert!(matches!(
+        second.load("b".into(), identity('b'), deadline).await,
+        Err(RuntimeError::MemoryBudgetExceeded { .. })
+    ));
+    first.evict(&identity('a').dataset_id).await;
+    drop(engine);
+    assert_eq!(pool.usage().reserved_bytes, 0);
+    let engine = second
+        .load("b".into(), identity('b'), deadline)
+        .await
+        .unwrap();
+    assert_eq!(pool.usage().reserved_bytes, 32 * MIB);
+    second.evict(&identity('b').dataset_id).await;
+    drop(engine);
+    assert_eq!(pool.usage().reserved_bytes, 0);
 }

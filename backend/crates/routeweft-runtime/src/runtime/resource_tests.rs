@@ -237,3 +237,133 @@ async fn legacy_load_cannot_satisfy_an_exact_absence_request() {
     assert!(!Arc::ptr_eq(&legacy, &exact));
     assert_eq!(route(&legacy, "mld"), route(&exact, "dijkstra"));
 }
+
+#[tokio::test]
+async fn paged_identity_upgrade_and_staging_keep_byte_and_file_lifetimes() {
+    let fixture = Fixture::new();
+    let path = fixture.path("raw");
+    routeweft_dataset::paged::prepare_query_index(&path, Default::default(), Default::default())
+        .unwrap();
+    let identity = crate::PagedResourceIdentity {
+        dataset: fixture.identity("raw").dataset,
+        query_index_sha256: routeweft_dataset::hash_file(
+            &path.join(routeweft_dataset::paged::INDEX_FILE),
+        )
+        .unwrap(),
+    };
+    let runtime = Runtime::new(
+        Arc::new(crate::PagedEngineLoader {
+            options: routeweft_routing::PagedOptions {
+                cache_bytes: 1024 * 1024,
+                query_workspace_bytes: 8 * 1024 * 1024,
+                ..Default::default()
+            },
+        }),
+        RuntimeConfig {
+            resident_datasets: 3,
+            memory_budget_bytes: Some(96 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    let old = runtime
+        .load_paged_resources(path.clone(), identity.clone(), deadline(), None)
+        .await
+        .unwrap();
+    let same = runtime
+        .load_paged_resources(path.clone(), identity.clone(), deadline(), None)
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&old, &same));
+    drop(same);
+    let mut wrong = identity.clone();
+    wrong.query_index_sha256 = "f".repeat(64);
+    assert!(matches!(
+        runtime
+            .validate_paged_resources(path.clone(), wrong, deadline(), Arc::new(()))
+            .await,
+        Err(crate::RuntimeError::InvalidDataset)
+    ));
+    let before = runtime.memory_usage().reserved_bytes;
+    runtime.evict(&identity.dataset.dataset_id).await;
+    assert_eq!(runtime.memory_usage().reserved_bytes, before);
+    let fresh = runtime
+        .load_paged_resources(path, identity, deadline(), None)
+        .await
+        .unwrap();
+    assert!(!Arc::ptr_eq(&old, &fresh));
+    assert_eq!(runtime.memory_usage().reserved_bytes, before * 2);
+    drop(old);
+    assert_eq!(runtime.memory_usage().reserved_bytes, before);
+    runtime.evict(&fresh.manifest().dataset_id).await;
+    drop(fresh);
+    assert_eq!(runtime.memory_usage().reserved_bytes, 0);
+}
+
+#[tokio::test]
+async fn mobile_policy_queries_and_retained_handle_resume_fit_shared_total() {
+    const MIB: u64 = 1024 * 1024;
+    let fixture = Fixture::new();
+    let path = fixture.path("raw");
+    routeweft_dataset::paged::prepare_query_index(&path, Default::default(), Default::default())
+        .unwrap();
+    let identity = crate::PagedResourceIdentity {
+        dataset: fixture.identity("raw").dataset,
+        query_index_sha256: routeweft_dataset::hash_file(
+            &path.join(routeweft_dataset::paged::INDEX_FILE),
+        )
+        .unwrap(),
+    };
+    let runtime = Runtime::new(
+        Arc::new(crate::PagedEngineLoader {
+            options: routeweft_routing::PagedOptions {
+                cache_bytes: 4 * MIB,
+                planning_workspace_bytes: 16 * MIB,
+                query_workspace_bytes: 64 * MIB,
+            },
+        }),
+        RuntimeConfig {
+            memory_budget_bytes: Some(128 * MIB),
+            query_workspace_bytes: 64 * MIB,
+            ..Default::default()
+        },
+    );
+    let engine = runtime
+        .load_paged_resources(path.clone(), identity.clone(), deadline(), None)
+        .await
+        .unwrap();
+    let stable = runtime.memory_usage().reserved_bytes;
+    for _ in 0..3 {
+        let resumed = runtime
+            .load_paged_resources(path.clone(), identity.clone(), deadline(), None)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&engine, &resumed));
+        let result = runtime
+            .route(
+                resumed,
+                vec![
+                    Point {
+                        lon: 0.0005,
+                        lat: 0.,
+                    },
+                    Point {
+                        lon: 0.0065,
+                        lat: 0.,
+                    },
+                ],
+                QueryOptions {
+                    radius_m: 1.,
+                    ..Default::default()
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.duration_s, 6.);
+        assert_eq!(runtime.memory_usage().reserved_bytes, stable);
+    }
+    assert!(runtime.memory_usage().peak_reserved_bytes <= 128 * MIB);
+    runtime.evict(&identity.dataset.dataset_id).await;
+    drop(engine);
+    assert_eq!(runtime.memory_usage().reserved_bytes, 0);
+}
