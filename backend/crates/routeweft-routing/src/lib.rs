@@ -236,6 +236,6 @@ mod roads;
 mod topology;
 pub use roads::{
     CoverageInfo, Engine, Leg, LoadDiagnostics, Nearest, PagedEngine, PagedOptions,
-    PagedResourcePlan, QueryOptions, RouteResult, RouteSample, RouteSamples, SamplingOptions, Step,
-    SAMPLER_VERSION,
+    PagedResourcePlan, QueryOptions, RouteResult, RouteSample, RouteSamples, SamplingOptions,
+    SnapDetail, Step, SAMPLER_VERSION,
 };

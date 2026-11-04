@@ -152,6 +152,7 @@ impl PagedEngine {
         point: Point,
         options: QueryOptions,
         component: Option<u32>,
+        routing: bool,
         ctx: &mut Context<'_, '_>,
     ) -> Result<Vec<Nearest>, Error> {
         point.coordinate().map_err(|_| Error::InvalidInput)?;
@@ -210,20 +211,19 @@ impl PagedEngine {
             };
             let d = distance(point, snapped);
             if d <= options.radius_m {
-                found.push(Nearest {
-                    edge: id,
-                    point: snapped,
-                    fraction,
-                    distance_m: d,
-                    from,
-                    to,
-                });
-                found.sort_by(|a, b| {
-                    a.distance_m
-                        .total_cmp(&b.distance_m)
-                        .then(a.edge.cmp(&b.edge))
-                });
-                found.truncate(options.candidates);
+                snapping::insert(
+                    &mut found,
+                    Nearest {
+                        edge: id,
+                        point: snapped,
+                        fraction,
+                        distance_m: d,
+                        from,
+                        to,
+                    },
+                    options.candidates,
+                    routing,
+                );
             }
             Ok(())
         });
@@ -244,7 +244,7 @@ impl PagedEngine {
         let result = match self.query.try_lock() {
             Ok(_guard) => {
                 ctx.attach_pages(&self.graph);
-                self.nearest_component(point, options, None, &mut ctx)
+                self.nearest_component(point, options, None, false, &mut ctx)
             }
             Err(_) => Err(ctx.fail("paged_query_busy", 1, 0)),
         };
@@ -283,13 +283,11 @@ impl PagedEngine {
         if !(2..=10).contains(&points.len()) {
             return Err(Error::InvalidInput);
         }
-        let mut matches = Vec::new();
+        let mut candidates = Vec::new();
         for &point in points {
-            let mut near = self.nearest_component(point, options, None, ctx)?;
-            let best = near[0].distance_m;
-            near.retain(|m| m.distance_m <= best + 0.01);
-            matches.push(near);
+            candidates.push(self.nearest_component(point, options, None, true, ctx)?);
         }
+        let mut matches: Vec<_> = candidates.iter().map(|v| snapping::closest(v)).collect();
         let mut components = Vec::new();
         for list in &matches {
             let mut ids = HashSet::new();
@@ -303,6 +301,9 @@ impl PagedEngine {
             .any(|c| components.iter().all(|s| s.contains(c)));
         if !common {
             for (i, list) in matches.iter_mut().enumerate() {
+                if i > 0 && i + 1 < points.len() {
+                    continue;
+                }
                 let (component, size) =
                     self.graph.component(list[0].from).map_err(dataset_error)?;
                 if component != self.graph.metadata.largest_component && size < 1000 {
@@ -310,6 +311,7 @@ impl PagedEngine {
                         points[i],
                         options,
                         Some(self.graph.metadata.largest_component),
+                        true,
                         ctx,
                     ) {
                         Ok(mut near) => {
@@ -324,6 +326,20 @@ impl PagedEngine {
                 }
             }
         }
+        snapping::route(
+            points,
+            options,
+            &candidates,
+            &matches,
+            ctx,
+            |selected, ctx| self.route_matched(selected, ctx),
+        )
+    }
+    fn route_matched(
+        &self,
+        matches: &[Vec<Nearest>],
+        ctx: &mut Context<'_, '_>,
+    ) -> Result<RouteResult, Error> {
         for pair in matches.windows(2) {
             let mut a = HashSet::new();
             for m in &pair[0] {
@@ -357,8 +373,8 @@ impl PagedEngine {
         }
         let restrictions = Restrictions::new(&sequences);
         drop(sequences);
-        let overlay = Overlay::with_base(self.manifest().nodes, &matches);
-        self.search_compact(&matches, &overlay, &restrictions, restriction_charge, ctx)
+        let overlay = Overlay::with_base(self.manifest().nodes, matches);
+        self.search_compact(matches, &overlay, &restrictions, restriction_charge, ctx)
     }
 }
 

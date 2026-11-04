@@ -3,6 +3,7 @@ mod compression;
 mod paged;
 mod recovery;
 mod sampling;
+mod snapping;
 pub use paged::{PagedEngine, PagedOptions, PagedResourcePlan};
 mod search;
 use crate::acceleration::{AccelerationInfo, CustomizationOptions, Index, Link};
@@ -136,6 +137,20 @@ pub struct RouteResult {
     pub legs: Vec<Leg>,
     pub steps: Vec<Step>,
     pub snapped: Vec<Point>,
+    /// All costs and geometry describe roads, excluding unverified access gaps.
+    pub distance_scope: &'static str,
+    pub snap_details: Vec<SnapDetail>,
+}
+#[derive(Debug, Serialize)]
+pub struct SnapDetail {
+    pub requested_coordinate: Point,
+    pub snapped_coordinate: Point,
+    pub snap_distance_m: f64,
+    pub search_radius_m: f64,
+    pub snap_method: &'static str,
+    pub fallback_used: bool,
+    pub access_status: &'static str,
+    pub arrival_status: &'static str,
 }
 /// Physical directed connectivity; turn-state reachability still needs queries.
 #[derive(Debug, Serialize)]
@@ -410,13 +425,14 @@ impl Engine {
         options: QueryOptions,
         ctx: &mut Context<'_, '_>,
     ) -> Result<Vec<Nearest>, Error> {
-        self.nearest_component(point, options, None, ctx)
+        self.nearest_component(point, options, None, false, ctx)
     }
     fn nearest_component(
         &self,
         point: Point,
         options: QueryOptions,
         component: Option<u32>,
+        routing: bool,
         ctx: &mut Context<'_, '_>,
     ) -> Result<Vec<Nearest>, Error> {
         point.coordinate().map_err(|_| Error::InvalidInput)?;
@@ -470,20 +486,19 @@ impl Engine {
             };
             let d = distance(point, projected);
             if d <= options.radius_m {
-                matches.push(Nearest {
-                    edge: item.id,
-                    point: projected,
-                    fraction,
-                    distance_m: d,
-                    from: e.from,
-                    to: e.to,
-                });
-                matches.sort_by(|a, b| {
-                    a.distance_m
-                        .total_cmp(&b.distance_m)
-                        .then(a.edge.cmp(&b.edge))
-                });
-                matches.truncate(options.candidates);
+                snapping::insert(
+                    &mut matches,
+                    Nearest {
+                        edge: item.id,
+                        point: projected,
+                        fraction,
+                        distance_m: d,
+                        from: e.from,
+                        to: e.to,
+                    },
+                    options.candidates,
+                    routing,
+                );
             }
         }
         if matches.is_empty() {
@@ -552,13 +567,11 @@ impl Engine {
         if ctx.budget.max_geometry == 0 {
             return Err(ctx.fail("geometry", 1, 0));
         }
-        let mut matches = Vec::new();
+        let mut candidates = Vec::new();
         for &p in points {
-            let mut near = self.nearest_work(p, options, ctx)?;
-            let best = near[0].distance_m;
-            near.retain(|v| v.distance_m <= best + 0.01);
-            matches.push(near);
+            candidates.push(self.nearest_component(p, options, None, true, ctx)?);
         }
+        let mut matches: Vec<_> = candidates.iter().map(|v| snapping::closest(v)).collect();
         // Keep a nearby closed component when ALL waypoints can use it;
         // otherwise seek a main-component alternative independently of top-k.
         let common = matches[0]
@@ -571,12 +584,16 @@ impl Engine {
             });
         if !common {
             for (i, list) in matches.iter_mut().enumerate() {
+                if i > 0 && i + 1 < points.len() {
+                    continue;
+                }
                 let c = self.components.weak[list[0].from];
                 if c != self.components.largest && self.components.size[c as usize] < 1000 {
                     match self.nearest_component(
                         points[i],
                         options,
                         Some(self.components.largest),
+                        true,
                         ctx,
                     ) {
                         Ok(mut alternatives) => {
@@ -591,7 +608,14 @@ impl Engine {
                 }
             }
         }
-        self.route_matched(&matches, ctx, acceleration)
+        snapping::route(
+            points,
+            options,
+            &candidates,
+            &matches,
+            ctx,
+            |selected, ctx| self.route_matched(selected, ctx, acceleration),
+        )
     }
     fn route_matched(
         &self,

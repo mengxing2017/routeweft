@@ -204,6 +204,8 @@ pub(super) fn recover_path(
         legs,
         steps,
         snapped,
+        distance_scope: "road_only",
+        snap_details: Vec::new(), // Filled once endpoint selection has finished.
     })
 }
 fn maneuver(
